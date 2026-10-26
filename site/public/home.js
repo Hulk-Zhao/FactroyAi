@@ -220,4 +220,67 @@
       }, 320);
     }, 2600);
   }
+
+  /* 系统卡六大业务场景与协同运营功能：竖向自动轮播 */
+  var scView = document.querySelector(".scene-viewport");
+  var scTrack = document.querySelector(".scene-track");
+  var scDots = document.querySelector(".scene-dots");
+  if (scView && scTrack) {
+    var scItems = Array.prototype.slice.call(scTrack.children);
+    var scTotal = scItems.length;
+    if (scTotal > 0) {
+      var scGap = 10;
+      var scStep = scItems[0].offsetHeight + scGap;
+      var scViewH = scView.clientHeight || 132;
+      var scPad = 16; /* track 上下 padding 8+8 */
+      var scPer = Math.max(1, Math.floor((scViewH - scPad + scGap) / (scItems[0].offsetHeight + scGap)));
+      var scIndex = 0;
+      var scMax = scTotal - scPer;
+      var scPages = Math.max(1, Math.ceil(scTotal / scPer));
+      var scReduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      var scTimer = null;
+      var scPaused = false;
+      var scDotsKids = [];
+      function scBuildDots() {
+        if (!scDots) return;
+        scDots.innerHTML = "";
+        scDotsKids = [];
+        for (var d = 0; d < scPages; d++) {
+          var idot = document.createElement("i");
+          scDots.appendChild(idot);
+          scDotsKids.push(idot);
+        }
+      }
+      function scSync() {
+        scTrack.style.transform = "translateY(" + (-scIndex * scStep) + "px)";
+        if (!scDotsKids.length) return;
+        var cur = Math.min(scPages - 1, Math.floor(scIndex / scPer));
+        for (var k = 0; k < scDotsKids.length; k++) {
+          scDotsKids[k].className = k === cur ? "on" : "";
+        }
+      }
+      function scNext() {
+        if (scPaused) return;
+        scIndex++;
+        if (scIndex > scMax) {
+          scTrack.style.transition = "none";
+          scIndex = 0;
+          scSync();
+          void scTrack.offsetWidth;
+          scTrack.style.transition = "";
+        } else {
+          scSync();
+        }
+      }
+      scBuildDots();
+      scSync();
+      if (scView) {
+        scView.addEventListener("mouseenter", function () { scPaused = true; });
+        scView.addEventListener("mouseleave", function () { scPaused = false; });
+      }
+      if (!scReduce && scMax > 0) {
+        scTimer = setInterval(scNext, 2800);
+      }
+    }
+  }
 })();
