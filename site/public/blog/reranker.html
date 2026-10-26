@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>把 Reranker 从 RAG 链路里拿掉之后 · Hulk Zhao</title>
+  <meta name="description" content="4C4G 后端机上拆掉本地 Reranker 后的检索改造：级联、Dense + BM25 双路召回、RRF 融合与阈值重标。" />
+  <link rel="canonical" href="https://hulkai.cn/blog/reranker.html" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23080D18'/%3E%3Cpath d='M9 9v14M23 9v14M9 16h14' stroke='%235B8CFF' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <script>document.documentElement.classList.add('js');</script>
+  <link rel="stylesheet" href="../home.css?v=20261026d" />
+  <link rel="stylesheet" href="blog.css?v=20261026d" />
+</head>
+<body>
+  <div class="progress" aria-hidden="true"><i id="progress"></i></div>
+
+  <header class="site-nav" id="nav">
+    <div class="nav-inner">
+      <a class="brand" href="/" aria-label="Hulk Zhao 首页">
+        <span class="brand-mark brand-avatar"><img src="/assets/avatar.png" alt="Hulk Zhao 头像" /></span>
+        <span class="brand-text"><b>Hulk Zhao</b><em>INDUSTRIAL AI / MFG SYSTEMS</em></span>
+      </a>
+      <nav class="nav-links" id="nav-menu" aria-label="主导航">
+        <a href="/#work">作品</a>
+        <a href="/blog/" class="active">博客</a>
+        <a href="/#about">关于</a>
+        <a href="/demo/">Demo</a>
+      </nav>
+      <div class="nav-right">
+        <a class="nav-gh" href="mailto:hulk_ai@163.com" aria-label="发送邮件" title="hulk_ai@163.com">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7.5l9 6 9-6"/></svg>
+        </a>
+        <a class="nav-cta" href="/demo/mfg/" target="_blank" rel="noopener">进入 Demo <span>↗</span></a>
+        <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-menu" aria-label="打开菜单"><span></span><span></span></button>
+      </div>
+    </div>
+  </header>
+
+  <main class="article-page">
+    <article class="article">
+      <div class="article-top">
+        <span class="article-cat">检索工程</span>
+        <span>2026-10-24</span>
+        <span>约 7 分钟</span>
+      </div>
+      <h1>把 Reranker 从 RAG 链路里拿掉之后</h1>
+      <p class="lede">4C4G 的后端机上，本地 BGE-M3 + Reranker 是启动内存和延迟的大头。这次改造把 embedding 交给云端，也顺手把重排模型拆了。拆掉不是目的；问题是拆掉之后拿什么补。</p>
+
+      <div class="article-body">
+        <div class="callout">
+          <p><strong>结论先说：</strong>去掉的不是「重排」这个动作，而是「每问必跑一次神经网络」的成本。用级联、双路召回和 RRF 把排序拆成三步，再用确定性业务加权收口；只有当 top1 与 top3 分数几乎一样时，才值得请一次轻量 LLM 重排。</p>
+        </div>
+
+        <h2>起点：为什么一定要拆</h2>
+        <p>部署目标是两台小机器：香港 2C2G 只跑 Nginx，广州 4C4G 跑完整后端。本地 BGE-M3 权重约 4.6GB，常驻内存 2GB+；Reranker 在 CPU 上单次 200–600ms。再加上 Milvus standalone 建议至少 8GB 内存，这台 4GB 机器没有可能同时留下它们。</p>
+        <p>而语料规模并不大：制度库 16 个部门约 400–700 个 chunk，案例库约 700–800 个 chunk，加起来 1700–2000 个向量。这个量级用 Chroma 嵌入式持久化足够，不需要 Milvus。真正需要重新回答的问题是：<strong>把本地模型全部拿掉之后，检索质量靠什么守住？</strong></p>
+
+        <h2>拆掉之后，排序会坏在哪</h2>
+        <p>制度问答的难点不是「找不到」，而是「找到了但排不准」。16 个部门的条文高度相似，很多问题同时命中好几条；单一路 dense 余弦能处理「报销要几天 → 费用核销时限」这类语义泛化，却压不住专有名词、制度名和编号的精确命中。</p>
+        <p>原来的 Reranker 是收口：所有候选都进去，由它统一打分。拆掉它，等于把两种完全不同的信号直接扔给一个余弦阈值。常见两类失效：</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>问题类型</th><th>单 dense 的风险</th><th>补法</th></tr></thead>
+            <tbody>
+              <tr><td>同义问法</td><td>语义相近的条文挤在一起，顺序不稳</td><td>扩大 dense 召回，交给 RRF 与业务加权</td></tr>
+              <tr><td>专有名词 / 编号</td><td>字面精确命中被语义相似度压下去</td><td>BM25 字符二元组召回，与 dense 并列</td></tr>
+              <tr><td>跨块答案</td><td>答案被切在相邻两个 chunk 里</td><td>相邻块合并，small-to-big</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h2>方案：先分级，再双路召回，最后 RRF</h2>
+        <p>第一步不是换模型，而是减少进入向量检索的问题。现有架构本来就有四级：</p>
+        <pre><code>L0 缓存
+ → L1 FAQ 精确匹配（纯词面，无 embedding）
+ → L1.5 域内意图（部门词表，sub-ms）
+ → L2 向量检索（只处理长尾）</code></pre>
+        <p>大量高频问题在 L1 就被拦掉，L2 只承担长尾。到了 L2，用两路召回：</p>
+        <ul>
+          <li><strong>Dense：</strong>云端 <code>qwen3.7-text-embedding-flash</code>（1024 维），召回 20–30 条，负责语义泛化。</li>
+          <li><strong>Lexical：</strong>本地内存 BM25，中文按字符二元组切词，不引 jieba；500–700 个 chunk 下 &lt;10ms，负责专有名词与编号。</li>
+        </ul>
+        <p>融合用 RRF（Reciprocal Rank Fusion），只看名次，不看原始分数：</p>
+        <pre><code>score(doc) = Σ_lane  1 / (60 + rank_lane(doc))</code></pre>
+        <p>融合之后再叠加确定性业务加权：命中意图部门的 +1 档；「怎么 / 如何」类问题优先「操作细则」；同一来源最多保留 2 块；相邻块同时命中时合并上下文。最后取 top 3 给 LLM。</p>
+
+        <h2>为什么是 RRF，不是分数加权</h2>
+        <p>cosine 相似度和 BM25 分数的量纲不可比。加权融合需要每次归一化，而换模型、换语料、改切块都会让参数重新漂移。RRF 只依赖名次：某一路排第几，就拿对应的倒数分。换 embedding 模型或扩语料时，不用重新标定融合参数，这是拆掉 reranker 后最省心的一点。</p>
+        <p>代价是 RRF 忽略分数间距。两路都排第一的文档和「勉强第一」的文档在 RRF 里没有差别，所以它不能替代「拒答」判断，也不能解决 top1 与 top3 几乎同分的情况。</p>
+
+        <h2>阈值必须重标，否则闸门失效</h2>
+        <p>这是最容易漏的一步。旧阈值 0.18 / 0.20 / 0.27 是按哈希 embedding 的分数分布标定的；云端 embedding 的无关问句相似度通常在 0.3–0.5，直接沿用会让系统「什么都答」。</p>
+        <p>标定必须在「同一个 embedding 模型 + 同一份语料」上做：用案例语料加 20 条无关问题（食堂、天气、股票之类）构造标定集，取无关组 p95 与相关组最低分之间的间隔，重新设置 <code>answer_min_score</code>、<code>low_confidence_threshold</code>、<code>answer_score_without_terms</code>。标定结果写回配置，并注明语料规模与日期，避免下一个人把它当成恒定真理。</p>
+        <p>查询侧失败语义保持 fail-closed：embedding 或检索失败时返回 <code>degraded</code>，不编造结果；低分走「检索不到」，而不是让 LLM 自由发挥。</p>
+
+        <h2>结果与代价</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>项</th><th>改造前</th><th>改造后</th></tr></thead>
+            <tbody>
+              <tr><td>本地模型</td><td>BGE-M3 4.6GB + Reranker</td><td>无</td></tr>
+              <tr><td>Reranker 延迟</td><td>200–600ms</td><td>0（可选云端重排）</td></tr>
+              <tr><td>本地 BM25</td><td>—</td><td>&lt;10ms</td></tr>
+              <tr><td>单次问答净变化</td><td>—</td><td>快约 200–500ms</td></tr>
+              <tr><td>启动内存</td><td>2GB+ 模型常驻</td><td>0.8–1.5GB</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>代码增量约 100 行 BM25 + 30 行 RRF，没有新增依赖。真正的成本不在实现，而在验证：必须用 30–50 条问答对看 <code>Recall@3</code>、无命中率和答非所问率，而不是凭一两个例子判断改造成功。</p>
+
+        <h2>什么时候值得把重排请回来</h2>
+        <p>只在一种情况下：top1 与 top3 分数几乎相同（margin &lt; 0.02）。这时对 3 条候选做一次轻量 LLM listwise 重排，约 0.5–1s，能补上 RRF 缺失的分数间距。不做每问必排，否则等于把 reranker 的延迟换个形式请回来。</p>
+        <p>云端 rerank 也保留为可选项，失败自动回落 RRF。它是增强，不是主链路。</p>
+
+        <h2>如果重来一次</h2>
+        <ul>
+          <li><strong>先建评测集，再改链路。</strong>30–50 条问答对不贵，但没有它，所有调参都是盲调。</li>
+          <li><strong>阈值和语料规模一起写进配置。</strong>阈值不是真理，是某次标定的产物。</li>
+          <li><strong>给每一路召回打日志。</strong>出问题时要知道是 dense 没召回、BM25 没命中，还是融合把顺序排错了。</li>
+        </ul>
+      </div>
+
+      <div class="article-bio">
+        <span class="mark">HZ</span>
+        <p><b>Hulk Zhao</b> · 制造业数字化 / 工业 AI。这个检索链路跑在 <a href="/demo/mfg/">智造协同平台</a>的演示环境里，可在线打开；部署取舍见 <a href="dual-server.html">2C2G + 4C4G 的部署复盘</a>。</p>
+      </div>
+
+      <div class="article-foot">
+        <a class="back" href="/blog/">← 全部文章</a>
+        <div class="next-post"><span>下一篇</span><a href="spc-double-sigma.html">Pp 恒等于 Cp：一个 SPC 工具的统计学缺陷 →</a></div>
+      </div>
+    </article>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-meta" style="margin-top:0;border-top:0;padding-top:0;">
+        <span>© <span id="year">2026</span> Hulk Zhao · hulkai.cn</span>
+        <span>文章中的数字来自项目仓库与可复算样本</span>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    (function () {
+      var bar = document.getElementById("progress");
+      if (!bar) return;
+      function tick() {
+        var h = document.documentElement;
+        var max = h.scrollHeight - h.clientHeight;
+        bar.style.width = (max > 0 ? (h.scrollTop / max) * 100 : 0) + "%";
+      }
+      tick();
+      window.addEventListener("scroll", tick, { passive: true });
+      window.addEventListener("resize", tick);
+    })();
+  </script>
+  <script defer src="../home.js?v=20261026d"></script>
+</body>
+</html>

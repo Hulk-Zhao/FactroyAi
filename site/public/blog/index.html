@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>博客 · 技术复盘 · Hulk Zhao</title>
+  <meta name="description" content="制造业数字化与工业 AI 项目的工程复盘：RAG 检索、Agent 编排与权限治理、SPC 统计口径、双机部署取舍。" />
+  <link rel="canonical" href="https://hulkai.cn/blog/" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23080D18'/%3E%3Cpath d='M9 9v14M23 9v14M9 16h14' stroke='%235B8CFF' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <script>document.documentElement.classList.add('js');</script>
+  <link rel="stylesheet" href="../home.css?v=20261026d" />
+  <link rel="stylesheet" href="blog.css?v=20261026d" />
+</head>
+<body>
+  <a class="skip" href="#list">跳到文章列表</a>
+
+  <header class="site-nav" id="nav">
+    <div class="nav-inner">
+      <a class="brand" href="/" aria-label="Hulk Zhao 首页">
+        <span class="brand-mark brand-avatar"><img src="/assets/avatar.png" alt="Hulk Zhao 头像" /></span>
+        <span class="brand-text"><b>Hulk Zhao</b><em>INDUSTRIAL AI / MFG SYSTEMS</em></span>
+      </a>
+      <nav class="nav-links" id="nav-menu" aria-label="主导航">
+        <a href="/#work">作品</a>
+        <a href="/blog/" class="active">博客</a>
+        <a href="/#about">关于</a>
+        <a href="/demo/">Demo</a>
+      </nav>
+      <div class="nav-right">
+        <a class="nav-gh" href="mailto:hulk_ai@163.com" aria-label="发送邮件" title="hulk_ai@163.com">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7.5l9 6 9-6"/></svg>
+        </a>
+        <a class="nav-cta" href="/demo/mfg/" target="_blank" rel="noopener">进入 Demo <span>↗</span></a>
+        <button class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-menu" aria-label="打开菜单"><span></span><span></span></button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container blog-page">
+    <div class="blog-head">
+      <p class="section-eyebrow">NOTES / 技术复盘</p>
+      <h1>把项目里的判断写下来</h1>
+      <p class="lede">项目里做过的取舍、踩过的坑和被验证过的口径。不是教程，是复盘：为什么这么做、代价是什么、怎么验证。</p>
+      <p class="blog-note">5 篇 · 按项目节奏更新，不为了更而更</p>
+    </div>
+
+    <div class="post-list" id="list">
+      <a class="post-row" href="fail-closed.html">
+        <div>
+          <span class="post-cat">治理设计</span>
+          <h2>宁可拒绝，也不猜：AI 系统的 fail-closed 纪律</h2>
+          <p>Agent 只能提议不能放行、403 与 404 的区别、演示口径与真实口径分列、推错工段比不推更贵——以及怎么把这些判断写成启动自检和测试。</p>
+        </div>
+        <div class="post-side">
+          <span class="post-date">2026-10-26</span>
+          <span class="post-read">约 6 分钟</span>
+          <span class="post-go">阅读全文 →</span>
+        </div>
+      </a>
+
+      <a class="post-row" href="agent-orchestration.html">
+        <div>
+          <span class="post-cat">Agent 编排</span>
+          <h2>18 个 Agent 的编排，难点不在模型</h2>
+          <p>场景 YAML 编译成 LangGraph 子图、总控的三条边界、Text2SQL 八道防线、LLM 掉线时怎么降级，以及 MCP / A2A 为什么不是治理后门。</p>
+        </div>
+        <div class="post-side">
+          <span class="post-date">2026-10-26</span>
+          <span class="post-read">约 6 分钟</span>
+          <span class="post-go">阅读全文 →</span>
+        </div>
+      </a>
+
+      <a class="post-row" href="reranker.html">
+        <div>
+          <span class="post-cat">检索工程</span>
+          <h2>把 Reranker 从 RAG 链路里拿掉之后</h2>
+          <p>4C4G 机器上跑不动本地重排模型。拆掉它之后，召回怎么补、阈值怎么重标、什么情况下才值得请回一次 LLM 精排。</p>
+        </div>
+        <div class="post-side">
+          <span class="post-date">2026-10-24</span>
+          <span class="post-read">约 7 分钟</span>
+          <span class="post-go">阅读全文 →</span>
+        </div>
+      </a>
+
+      <a class="post-row" href="spc-double-sigma.html">
+        <div>
+          <span class="post-cat">质量统计</span>
+          <h2>Pp 恒等于 Cp：一个 SPC 工具的统计学缺陷</h2>
+          <p>旧工具把组内 σ 直接当成整体 σ，能力指数看起来很美。用一份合成样本拆开两个口径，差 43% 的信息不应该被抹平。</p>
+        </div>
+        <div class="post-side">
+          <span class="post-date">2026-10-22</span>
+          <span class="post-read">约 6 分钟</span>
+          <span class="post-go">阅读全文 →</span>
+        </div>
+      </a>
+
+      <a class="post-row" href="dual-server.html">
+        <div>
+          <span class="post-cat">部署运维</span>
+          <h2>2C2G + 4C4G：一次前后端分离部署的取舍</h2>
+          <p>香港只跑 Nginx，广州只跑 FastAPI；跨机反代、SSE 关缓冲、向量库文件锁、Docker 端口绕过防火墙，一个都不省。</p>
+        </div>
+        <div class="post-side">
+          <span class="post-date">2026-10-24</span>
+          <span class="post-read">约 8 分钟</span>
+          <span class="post-go">阅读全文 →</span>
+        </div>
+      </a>
+    </div>
+
+    <p class="blog-foot-note">文章里的数字来自项目仓库、演示数据与可复算样本；不确定的地方会标明边界。交流或索取仓库地址：<a href="mailto:hulk_ai@163.com" style="color:var(--blue-dark);text-decoration:none;">hulk_ai@163.com</a></p>
+
+    <div class="article-foot">
+      <a class="back" href="/">← 返回个人主页</a>
+      <div class="next-post"><span>作品</span><a href="/#work">两个可验证的项目 →</a></div>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-meta" style="margin-top:0;border-top:0;padding-top:0;">
+        <span>© <span id="year">2026</span> Hulk Zhao · hulkai.cn</span>
+        <span>博客 / 作品 / Demo 同源静态部署</span>
+      </div>
+    </div>
+  </footer>
+
+  <script defer src="../home.js?v=20261026d"></script>
+</body>
+</html>

@@ -1,0 +1,382 @@
+/* =========================================================
+   hulkai.cn · 博客 / 技术复盘
+   依赖 home.css 的变量、导航与页脚样式
+   ========================================================= */
+
+.progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 70;
+  background: transparent;
+  pointer-events: none;
+}
+.progress i {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, var(--blue), var(--cyan));
+}
+
+/* ---------------- 博客列表 ---------------- */
+.blog-page {
+  padding: calc(var(--nav-h) + 66px) 0 96px;
+}
+.blog-head { max-width: 800px; }
+.blog-head h1 {
+  margin-top: 14px;
+  font-size: clamp(34px, 4.4vw, 54px);
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+  font-weight: 800;
+  color: var(--text);
+}
+.blog-head .lede {
+  max-width: 680px;
+  margin-top: 18px;
+  font-size: 16px;
+  line-height: 1.82;
+  color: var(--muted);
+}
+.blog-head .blog-note {
+  margin-top: 22px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: #8b97a8;
+}
+
+.post-list {
+  display: grid;
+  gap: 16px;
+  max-width: 920px;
+  margin-top: 48px;
+}
+.post-row {
+  display: grid;
+  grid-template-columns: 1fr 150px;
+  gap: 28px;
+  align-items: center;
+  padding: 26px 28px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fff;
+  text-decoration: none;
+  transition: transform .22s ease, box-shadow .22s ease, border-color .22s ease;
+}
+.post-row:hover {
+  transform: translateY(-3px);
+  border-color: #c9d4e4;
+  box-shadow: 0 16px 38px rgba(17, 24, 39, .08);
+}
+.post-row .post-cat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .06em;
+  color: var(--blue-dark);
+}
+.post-row .post-cat::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 1.5px;
+  background: var(--blue);
+  transform: rotate(45deg);
+}
+.post-row h2 {
+  margin-top: 10px;
+  font-size: 22px;
+  line-height: 1.38;
+  letter-spacing: -.015em;
+  font-weight: 800;
+  color: var(--text);
+}
+.post-row p {
+  margin-top: 9px;
+  font-size: 13.5px;
+  line-height: 1.75;
+  color: var(--muted);
+}
+.post-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  text-align: right;
+}
+.post-date {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: #93a0b2;
+}
+.post-read {
+  font-size: 11.5px;
+  color: #7d8a9d;
+}
+.post-go {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 700;
+}
+.blog-foot-note {
+  max-width: 920px;
+  margin-top: 34px;
+  padding-top: 22px;
+  border-top: 1px solid var(--line);
+  font-size: 12.5px;
+  line-height: 1.8;
+  color: #8b97a8;
+}
+
+/* ---------------- 文章页 ---------------- */
+.article-page { padding: calc(var(--nav-h) + 58px) 0 80px; }
+.article {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+.article-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  color: #8b97a8;
+}
+.article-cat {
+  padding: 4px 9px;
+  border-radius: 5px;
+  border: 1px solid rgba(47, 107, 255, .16);
+  background: rgba(47, 107, 255, .06);
+  color: var(--blue-dark);
+  font-weight: 600;
+}
+.article h1 {
+  margin-top: 20px;
+  font-size: clamp(31px, 4.2vw, 45px);
+  line-height: 1.22;
+  letter-spacing: -.03em;
+  font-weight: 800;
+  color: var(--text);
+}
+.article .lede {
+  margin-top: 18px;
+  font-size: 17.5px;
+  line-height: 1.82;
+  color: #4c586b;
+}
+.article-body { margin-top: 40px; }
+.article-body h2 {
+  margin: 46px 0 14px;
+  font-size: 23px;
+  line-height: 1.42;
+  letter-spacing: -.015em;
+  font-weight: 800;
+  color: var(--text);
+  scroll-margin-top: calc(var(--nav-h) + 20px);
+}
+.article-body h3 {
+  margin: 30px 0 10px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text);
+}
+.article-body p {
+  margin: 14px 0;
+  font-size: 15.5px;
+  line-height: 1.9;
+  color: #2b3646;
+}
+.article-body ul, .article-body ol {
+  margin: 16px 0;
+  padding-left: 22px;
+}
+.article-body li {
+  margin: 8px 0;
+  font-size: 15.5px;
+  line-height: 1.82;
+  color: #2b3646;
+}
+.article-body strong { color: var(--text); font-weight: 700; }
+.article-body a {
+  color: var(--blue-dark);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(47, 107, 255, .3);
+}
+.article-body a:hover { border-bottom-color: var(--blue-dark); }
+.article-body code {
+  white-space: break-spaces;
+}
+.article-body pre {
+  margin: 20px 0;
+  padding: 18px 20px;
+  border-radius: 12px;
+  background: #0b1220;
+  color: #dbe6f7;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-x: auto;
+  border: 1px solid rgba(120, 160, 255, .14);
+}
+.article-body pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+  white-space: pre;
+}
+.article-body blockquote {
+  margin: 22px 0;
+  padding: 14px 18px;
+  border-left: 3px solid var(--blue);
+  background: #f5f8ff;
+  border-radius: 0 10px 10px 0;
+  color: #344052;
+  font-size: 14.5px;
+  line-height: 1.8;
+}
+.article-body blockquote p { margin: 0; font-size: inherit; }
+
+.callout {
+  margin: 22px 0;
+  padding: 18px 20px;
+  border: 1px solid #d8e4ff;
+  border-radius: 14px;
+  background: #f3f7ff;
+}
+.callout p { margin: 0; font-size: 14px; line-height: 1.8; color: #2b3a54; }
+.callout strong { color: #143a8f; }
+
+.article-body table {
+  width: 100%;
+  margin: 22px 0;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+.article-body th, .article-body td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #e4e8ef;
+  text-align: left;
+  vertical-align: top;
+}
+.article-body th {
+  background: #f5f7fa;
+  color: #4c586b;
+  font-weight: 700;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.article-body td { color: #2b3646; }
+.article-body tr:last-child td { border-bottom: 0; }
+.table-wrap { overflow-x: auto; margin: 22px 0; }
+.table-wrap table { margin: 0; }
+
+.article-body figure {
+  margin: 28px 0;
+}
+.article-body figure img {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(17, 24, 39, .07);
+}
+.article-body figcaption {
+  margin-top: 10px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #8b97a8;
+  text-align: center;
+}
+
+.article-foot {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin-top: 56px;
+  padding-top: 26px;
+  border-top: 1px solid var(--line);
+}
+.article-foot .back {
+  font-size: 13px;
+  color: var(--muted);
+  text-decoration: none;
+}
+.article-foot .back:hover { color: var(--blue-dark); }
+.next-post {
+  max-width: 360px;
+  text-align: right;
+}
+.next-post span {
+  display: block;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: .12em;
+  color: #93a0b2;
+}
+.next-post a {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  text-decoration: none;
+}
+.next-post a:hover { color: var(--blue-dark); }
+
+.article-bio {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin-top: 42px;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fafbfd;
+}
+.article-bio .mark {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, #2f6bff, #2bd9c1);
+  color: #04101d;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 800;
+}
+.article-bio p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--muted);
+}
+.article-bio b { color: var(--text); }
+
+@media (max-width: 760px) {
+  .blog-page { padding-top: calc(var(--nav-h) + 46px); }
+  .post-row { grid-template-columns: 1fr; gap: 14px; padding: 22px; }
+  .post-side { flex-direction: row; align-items: center; justify-content: space-between; text-align: left; border-top: 1px solid #eef1f5; padding-top: 14px; }
+  .post-side .post-go { margin-top: 0; }
+  .article { padding: 0 20px; }
+  .article-page { padding-top: calc(var(--nav-h) + 42px); }
+  .article-foot { flex-direction: column; }
+  .next-post { text-align: left; }
+}
