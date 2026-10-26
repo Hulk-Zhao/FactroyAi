@@ -75,15 +75,16 @@ export async function serveStatic(req, res, rootDir, urlPath) {
 
   const ext = extname(target).toLowerCase();
   const isHashedAsset = urlPath.startsWith('/assets/');
-  res.writeHead(200, {
+  const headers = {
     'Content-Type': MIME[ext] || 'application/octet-stream',
     'Cache-Control': isHashedAsset ? 'public, max-age=31536000, immutable' : 'no-cache',
-  });
+  };
   if (req.method === 'HEAD') {
-    res.setHeader('Content-Length', info.size);
+    res.writeHead(200, { ...headers, 'Content-Length': info.size });
     res.end();
     return true;
   }
+  res.writeHead(200, headers);
   createReadStream(target).pipe(res);
   return true;
 }
