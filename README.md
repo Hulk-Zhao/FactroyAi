@@ -31,6 +31,22 @@ docs/                          # 架构与改造记录
 | `/demo/hogo-qa/` | SPC 质量分析工具在线版 | 香港反代 → 本机 `hogo-qa` 容器 `:8788` |
 | `/api/*` | 智造协同平台接口与 SSE | 香港反代 → 广州 `:8004` |
 
+## 分支与发布
+
+- **`main`：生产分支。** 两台服务器都只拉 `main`，任何要上线的改动最终都要合进来。
+- **`mfg` / `hogo` / `site`：项目开发分支。** 改哪个项目就在哪个分支上做：mfg → `mfg`，
+  SPC 工具 → `hogo`，主页与博客 → `site`。
+
+```bash
+git checkout mfg                     # 换成 hogo / site
+# ...改动、本地验证...
+git commit -am "feat(mfg): ..."
+git push origin mfg                  # 远端留一份备份（可选）
+git checkout main
+git merge --no-ff mfg                # 合回生产分支
+git push origin main                 # 服务器 pull 到的就是这次改动
+```
+
 ## 新增内容放哪里
 
 先判断「有没有服务端」，再决定动哪几个文件：
