@@ -1305,7 +1305,7 @@ body.nav-open .nav-toggle span:nth-child(2) { top: 18px; transform: rotate(-45de
   display: flex;
   gap: 22px;
   width: max-content;
-  animation: marquee 26s linear infinite;
+  animation: marquee 60s linear infinite;
 }
 .scene-strip:hover .scene-track { animation-play-state: paused; }
 .scene-track span {
