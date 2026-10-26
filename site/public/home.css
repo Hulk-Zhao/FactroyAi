@@ -1281,6 +1281,52 @@ body.nav-open .nav-toggle span:nth-child(2) { top: 18px; transform: rotate(-45de
 }
 @keyframes marquee { to { transform: translateX(-50%); } }
 
+/* 系统卡底部：六大业务场景功能滚动带 */
+.scene-strip {
+  position: relative;
+  margin-top: 12px;
+  padding: 10px 0;
+  overflow: hidden;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.scene-strip::before,
+.scene-strip::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 40px;
+  z-index: 2;
+  pointer-events: none;
+}
+.scene-strip::before { left: 0; background: linear-gradient(90deg, rgba(13, 22, 38, 0.95), transparent); }
+.scene-strip::after { right: 0; background: linear-gradient(-90deg, rgba(13, 22, 38, 0.95), transparent); }
+.scene-track {
+  display: flex;
+  gap: 22px;
+  width: max-content;
+  animation: marquee 26s linear infinite;
+}
+.scene-strip:hover .scene-track { animation-play-state: paused; }
+.scene-track span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: #8ea3c4;
+  white-space: nowrap;
+}
+.scene-track span::before {
+  content: "";
+  width: 4px;
+  height: 4px;
+  border-radius: 1px;
+  background: linear-gradient(135deg, var(--blue), var(--cyan));
+  transform: rotate(45deg);
+}
+
 /* 系统卡实时日志 */
 .sys-log {
   display: flex;
