@@ -1,0 +1,57 @@
+name: hulkai-gz-api
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: mfg_redis
+    restart: unless-stopped
+    # 纯缓存/限流用途：不落盘，内存上限 256mb，LRU 淘汰
+    command: ["redis-server", "--maxmemory", "256mb",
+              "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+  app:
+    build:
+      # 广州只跑 FastAPI：指向项目源码目录
+      context: ../../projects/mfg-agent/api
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.cloud.tencent.com/pypi/simple}
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim-bookworm}
+    image: ${IMAGE_TAG:-mfg-agent-backend:latest}
+    container_name: mfg_app
+    # 密钥从部署目录本地的 .env 读取（清单：projects/mfg-agent/api/.env.example -> 本目录 .env）
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      LANG: C.UTF-8
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "8004:8004"
+    volumes:
+      - mfg_data:/app/data
+    mem_limit: 2800m
+    memswap_limit: 3400m
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8004/api/v2/health"]
+      interval: 30s
+      timeout: 10s
+      # 首次启动要建 2594 条向量索引（约 1–3 分钟），给足启动窗口
+      start_period: 300s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+volumes:
+  mfg_data:
+    name: mfg_data

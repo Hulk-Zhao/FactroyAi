@@ -1,0 +1,85 @@
+name: hulkai-web
+
+services:
+  nginx:
+    # 香港只跑 Nginx：静态站 + /demo 静态应用 + /api 反代
+    image: ${NGINX_IMAGE:-nginx:1.27-alpine}
+    container_name: hulkai_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      # 首次签发证书时用 NGINX_CONF=default.http.conf（此时 443 证书还不存在）
+      - ./nginx/${NGINX_CONF:-default.conf}:/etc/nginx/conf.d/default.conf:ro
+      # 站点根目录：site/public
+      - ../../site/public:/usr/share/nginx/html:ro
+      # 各项目前端：/demo/<project>/ 通过 alias 映射到这里
+      - ../../projects:/srv/projects:ro
+      - letsencrypt:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    restart: unless-stopped
+    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "--no-check-certificate", "https://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # Hogo-QA-tool：SPC 质量分析工具（React 产物 + 零依赖 Node 服务）
+  # 只对香港本机暴露，由上面的 nginx 反代到 /demo/hogo-qa/，不占用公网端口。
+  hogo-qa:
+    build:
+      context: ../../projects/hogo-qa
+      args:
+        # 子路径部署：前端按 /demo/hogo-qa/ 生成资源地址、路由 basename 与 API 前缀
+        HOGO_BASE: /demo/hogo-qa/
+    image: ${HOGO_IMAGE:-hulkai-hogo-qa:latest}
+    container_name: hulkai_hogo_qa
+    environment:
+      TZ: Asia/Shanghai
+      # 演示口令（防刷门禁）；公网部署请在 deploy/hk-web/.env 里覆盖
+      AUTH_PASSWORD: ${HOGO_AUTH_PASSWORD:-123}
+      # 留空则首次启动自动生成并持久化到卷 hulkai_hogo_runtime
+      AUTH_SECRET: ${HOGO_AUTH_SECRET:-}
+    volumes:
+      - hogo_runtime:/app/backend/data/runtime
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8788/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: hulkai_certbot
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: >
+      /bin/sh -c 'trap exit TERM;
+      while :; do certbot renew --webroot -w /var/www/certbot --quiet;
+      sleep 12h & wait $${!}; done'
+    restart: unless-stopped
+
+volumes:
+  # 沿用旧卷名，避免已在线的 Let's Encrypt 证书失效
+  letsencrypt:
+    name: mfg_letsencrypt
+  certbot_www:
+    name: mfg_certbot_www
+  # Hogo-QA-tool 运行时密钥（容器重建后登录会话不失效）
+  hogo_runtime:
+    name: hulkai_hogo_runtime
