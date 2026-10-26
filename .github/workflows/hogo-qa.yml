@@ -1,0 +1,52 @@
+name: CI · Hogo-QA-tool
+
+# 子项目 CI：只在该项目相关文件变动时触发，避免改博客也跑一遍构建。
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'projects/hogo-qa/**'
+      - '.github/workflows/hogo-qa.yml'
+  pull_request:
+    paths:
+      - 'projects/hogo-qa/**'
+      - '.github/workflows/hogo-qa.yml'
+
+jobs:
+  verify:
+    name: 类型 / 静态检查 / 单测 / 构建
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: projects/hogo-qa/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: 'projects/hogo-qa/frontend/.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: projects/hogo-qa/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run sample:verify
+      - run: npm run build
+      # 线上形态：子路径部署（与 deploy/hk-web 的构建参数一致）
+      - run: npm run build:server
+        env:
+          HOGO_BASE: /demo/hogo-qa/
+
+  backend:
+    name: 后端冒烟（语法 / 登录防刷）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: projects/hogo-qa
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --check backend/server.mjs
+      - run: node backend/scripts/smoke.mjs
