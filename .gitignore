@@ -1,0 +1,46 @@
+# 密钥与本地配置
+.env
+.env.*
+!.env.example
+
+# 运行时数据（必须由 Docker volume 持久化，不能入库）
+*.db
+*.db-journal
+*.db-wal
+# 例外：演示种子库（合成数据，随仓库分发，首次启动拷入 volume）
+!projects/mfg-agent/api/data/demo_seed/*.db
+data/chroma/
+data/chroma_case/
+projects/mfg-agent/api/data/chroma/
+projects/mfg-agent/api/data/chroma_case/
+logs/
+
+# 测试临时目录
+_qa/
+projects/mfg-agent/api/_qa/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# 前端依赖与构建产物（子项目自带 .gitignore，这里只做兜底）
+node_modules/
+projects/*/web/node_modules/
+projects/*/frontend/node_modules/
+projects/*/frontend/dist/
+projects/*/frontend/dist-server/
+projects/*/backend/data/runtime/
+
+# IDE 分享产物（Trae 生成的 html 打包，不入库）
+.trae-html-share-packages/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
