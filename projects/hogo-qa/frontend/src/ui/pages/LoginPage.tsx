@@ -2,19 +2,32 @@
  * LoginPage —— 演示登录门禁页（部署在云端做作品展示时的第一屏）。
  *
  * 风格参考 mfg-agent 演示门户：工业深色底 + 品牌标记 + 玻璃拟态卡片。
- * 门禁目的是防恶意刷访问（单口令 + 后端按 IP 限流），不是用户体系，
- * 因此页面上明示演示口令，访客按提示即可进入。
+ * 门禁目的是防恶意刷访问（口令 + 一次性图形验证码 + 后端按 IP 限流），
+ * 不是用户体系，因此页面上明示演示口令，访客按提示即可进入。
  */
 
-import { Alert, Box, Button, Chip, CircularProgress, InputAdornment, TextField, Typography } from '@mui/material';
+import { Alert, Box, Button, Chip, CircularProgress, InputAdornment, Stack, TextField, Typography } from '@mui/material';
 import { LockOutlined as LockIcon, Visibility, VisibilityOff } from '@mui/icons-material';
-import { useState, type FormEvent, type ReactElement } from 'react';
-import { login } from '@/services/auth/authClient';
+import { useCallback, useEffect, useState, type FormEvent, type ReactElement } from 'react';
+import { fetchCaptcha, login, type CaptchaChallenge } from '@/services/auth/authClient';
 
 /** 页面主题色（工业深蓝，与 mfg-agent 门户同系）。 */
 const PAGE_BG = 'linear-gradient(160deg, #080d18 0%, #0c1426 55%, #101b33 100%)';
 const CARD_BG = 'rgba(255,255,255,0.045)';
 const ACCENT = '#5b8cff';
+
+/** 深色主题输入框（口令 / 验证码共用，避免两处样式漂移）。 */
+const DARK_FIELD_SX = {
+  '& .MuiOutlinedInput-root': {
+    color: '#eef2ff',
+    '& fieldset': { borderColor: 'rgba(91,140,255,0.35)' },
+    '&:hover fieldset': { borderColor: 'rgba(91,140,255,0.6)' },
+    '&.Mui-focused fieldset': { borderColor: ACCENT },
+  },
+} as const;
+
+/** 验证码输入长度（与后端 CAPTCHA_LEN 一致）。 */
+const CAPTCHA_LEN = 4;
 
 /** 特性卖点（登录页上的"作品名片"）。 */
 const FEATURES = ['SPC 控制图', 'Cp · Cpk · Pp · Ppk', '12 条判异准则', '柏拉图', 'AI 解读（可选）', 'Excel / Word 报表'];
@@ -30,19 +43,44 @@ export default function LoginPage({ onSuccess }: { onSuccess: () => void }): Rea
   const [showPwd, setShowPwd] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [captcha, setCaptcha] = useState<CaptchaChallenge | null>(null);
+  const [captchaCode, setCaptchaCode] = useState('');
+  const [captchaError, setCaptchaError] = useState<string | null>(null);
+  const [loadingCaptcha, setLoadingCaptcha] = useState(true);
 
-  /** 提交登录；失败信息直接展示（含限流锁定提示）。 */
+  /** 拉取（或刷新）一张验证码；失败保留可读原因，登录按钮保持禁用（fail-closed）。 */
+  const loadCaptcha = useCallback(async (): Promise<void> => {
+    setLoadingCaptcha(true);
+    setCaptchaError(null);
+    setCaptchaCode('');
+    const outcome = await fetchCaptcha();
+    setLoadingCaptcha(false);
+    if (outcome.ok) {
+      setCaptcha(outcome.challenge);
+    } else {
+      setCaptcha(null);
+      setCaptchaError(outcome.message);
+    }
+  }, []);
+
+  // 首屏即取码；验证码一次性，登录失败后必须重新取。
+  useEffect(() => {
+    void loadCaptcha();
+  }, [loadCaptcha]);
+
+  /** 提交登录；失败信息直接展示（含验证码失效 / 限流锁定提示），并刷新验证码。 */
   const handleSubmit = async (e: FormEvent): Promise<void> => {
     e.preventDefault();
-    if (submitting) return;
+    if (submitting || !captcha) return;
     setError(null);
     setSubmitting(true);
-    const outcome = await login(password);
+    const outcome = await login(password, { id: captcha.captchaId, code: captchaCode });
     setSubmitting(false);
     if (outcome.ok) {
       onSuccess();
     } else {
       setError(outcome.message);
+      void loadCaptcha();
     }
   };
 
@@ -156,15 +194,7 @@ export default function LoginPage({ onSuccess }: { onSuccess: () => void }): Rea
             autoFocus
             data-testid="login-password"
             InputLabelProps={{ style: { color: 'rgba(238,242,255,0.6)' } }}
-            sx={{
-              mb: 1.5,
-              '& .MuiOutlinedInput-root': {
-                color: '#eef2ff',
-                '& fieldset': { borderColor: 'rgba(91,140,255,0.35)' },
-                '&:hover fieldset': { borderColor: 'rgba(91,140,255,0.6)' },
-                '&.Mui-focused fieldset': { borderColor: ACCENT },
-              },
-            }}
+            sx={{ mb: 1.5, ...DARK_FIELD_SX }}
             InputProps={{
               startAdornment: (
                 <InputAdornment position="start">
@@ -183,6 +213,86 @@ export default function LoginPage({ onSuccess }: { onSuccess: () => void }): Rea
             }}
           />
 
+          {/* 验证码：一次性、约 10 分钟有效；点击图片（或回车/空格）刷新。 */}
+          <Stack
+            direction="row"
+            spacing={1.5}
+            alignItems="flex-start"
+            sx={{ mb: captchaError ? 0.5 : 1.5 }}
+          >
+            <TextField
+              fullWidth
+              size="small"
+              label="验证码"
+              placeholder={`输入图中 ${CAPTCHA_LEN} 位字符`}
+              value={captchaCode}
+              onChange={(e) => setCaptchaCode(e.target.value.toUpperCase().slice(0, CAPTCHA_LEN))}
+              error={!!error}
+              autoComplete="off"
+              data-testid="login-captcha"
+              InputLabelProps={{ style: { color: 'rgba(238,242,255,0.6)' } }}
+              inputProps={{
+                maxLength: CAPTCHA_LEN,
+                inputMode: 'text',
+                'data-testid': 'login-captcha-input',
+              }}
+              sx={DARK_FIELD_SX}
+            />
+            <Box
+              role="button"
+              tabIndex={0}
+              aria-label="点击刷新验证码"
+              title="看不清？点击刷新"
+              data-testid="login-captcha-image"
+              onClick={() => void loadCaptcha()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  void loadCaptcha();
+                }
+              }}
+              sx={{
+                width: 124,
+                height: 40,
+                flexShrink: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                borderRadius: 1,
+                overflow: 'hidden',
+                cursor: 'pointer',
+                userSelect: 'none',
+                border: '1px solid rgba(91,140,255,0.35)',
+                bgcolor: 'rgba(255,255,255,0.06)',
+                opacity: loadingCaptcha ? 0.55 : 1,
+                transition: 'opacity .2s',
+                '& svg': { display: 'block', width: '100%', height: '100%' },
+              }}
+            >
+              {captcha ? (
+                <Box
+                  component="span"
+                  sx={{ display: 'block', width: '100%', height: '100%' }}
+                  dangerouslySetInnerHTML={{ __html: captcha.svg }}
+                />
+              ) : (
+                <Typography variant="caption" sx={{ color: 'rgba(238,242,255,0.75)' }}>
+                  {loadingCaptcha ? '加载中…' : '点击重试'}
+                </Typography>
+              )}
+            </Box>
+          </Stack>
+
+          {captchaError && (
+            <Typography
+              variant="caption"
+              sx={{ display: 'block', mt: 0.25, mb: 1.25, color: '#ff9b9b' }}
+              data-testid="login-captcha-error"
+            >
+              {captchaError} · 点击图片重试
+            </Typography>
+          )}
+
           {error && (
             <Alert severity="error" sx={{ mb: 1.5, '& .MuiAlert-message': { fontSize: 13 } }} data-testid="login-error">
               {error}
@@ -193,7 +303,7 @@ export default function LoginPage({ onSuccess }: { onSuccess: () => void }): Rea
             type="submit"
             fullWidth
             variant="contained"
-            disabled={submitting || password.length === 0}
+            disabled={submitting || password.length === 0 || captchaCode.trim().length < CAPTCHA_LEN || !captcha}
             data-testid="login-submit"
             sx={{
               py: 1.1,
@@ -210,7 +320,7 @@ export default function LoginPage({ onSuccess }: { onSuccess: () => void }): Rea
 
         {/* 口令提示：门禁用于防刷，不是保密；上线可在 backend/.env 修改 AUTH_PASSWORD */}
         <Typography variant="caption" sx={{ display: 'block', mt: 2, color: 'rgba(238,242,255,0.6)' }} data-testid="login-hint">
-          演示口令：123 · 仅用于防止恶意访问 · 连续输错会被临时锁定
+          演示口令：123 · 输入图形验证码后进入 · 验证码一次性，点击图片可刷新
         </Typography>
       </Box>
 

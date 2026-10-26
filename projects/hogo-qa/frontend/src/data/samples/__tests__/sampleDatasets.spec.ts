@@ -1,7 +1,7 @@
 /**
  * sampleDatasets.spec —— 样例数据集的回归断言。
  *
- * 口径：与样例展示页（SampleDataPage）及能力分析页默认口径**完全一致**——
+ * 口径：与数据导入页的样例区（ImportPage）及能力分析页默认口径**完全一致**——
  * 子组容量 5（Xbar-R）+ σ_within 走 R̄/d2；Cpk 用组内 σ、Ppk 用整体 σ。
  * 页面卡片展示的每个数字都由这里的同一条计算路径得出，全部可复算。
  *
@@ -22,10 +22,10 @@ import {
 } from '../sampleDatasets';
 import { generateSampleValues, type SampleCharacteristicPlan } from '../sampleGenerator';
 
-/** 与 SampleDataPage.PREVIEW_SUBGROUP_CAPACITY 同值。 */
+/** 与 ImportPage.PREVIEW_SUBGROUP_CAPACITY 同值。 */
 const CAPACITY = 5;
 
-/** 样例页同一条计算路径：固定容量 5 子组 + R 口径 σ_within。 */
+/** 样例区同一条计算路径：固定容量 5 子组 + R 口径 σ_within。 */
 function previewCapability(plan: SampleCharacteristicPlan) {
   const values = generateSampleValues(plan);
   const spec: SpecLimits = {

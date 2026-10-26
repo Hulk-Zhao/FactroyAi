@@ -3,7 +3,7 @@
  *
  * 语义口径：
  * - 门禁的目的是"部署在云端做作品展示时防恶意刷访问"，不是用户体系：
- *   单口令（默认 123）+ 无状态 HMAC token。
+ *   单口令（默认 123）+ 一次性图形验证码 + 无状态 HMAC token。
  * - token 存 localStorage（含过期时间），本模块先做本地过期预检，再由
  *   /api/auth/check 做服务端确认（签名 / 提前吊销场景）。
  * - `file://` 离线双击包没有后端，门禁自动关闭——离线核心功能不受影响。
@@ -78,18 +78,74 @@ export type LoginOutcome =
   | { ok: true; session: AuthSession }
   | { ok: false; message: string; retryAfterMs?: number };
 
+/** 一次图形验证码（SVG 由后端签发，一次性、约 10 分钟有效）。 */
+export interface CaptchaChallenge {
+  captchaId: string;
+  /** 内联 SVG 字符串（已服务端生成，可直接注入 DOM / data URI）。 */
+  svg: string;
+  /** 有效期（毫秒）。 */
+  ttlMs: number;
+}
+
+/** 获取验证码结果。 */
+export type CaptchaOutcome =
+  | { ok: true; challenge: CaptchaChallenge }
+  | { ok: false; message: string };
+
 /**
- * 用口令登录。
+ * 拉取一张新验证码（点击图片刷新时复用同一函数）。
  *
+ * 失败（后端不可达／被限速）返回可读原因——登录页据此展示"点击重试"，
+ * 不静默退回"无验证码登录"（门禁是 fail-closed 的）。
+ */
+export async function fetchCaptcha(): Promise<CaptchaOutcome> {
+  try {
+    const res = await fetch(`${API_BASE}auth/captcha`, { cache: 'no-store' });
+    const body = (await res.json().catch(() => null)) as
+      | { ok?: boolean; captchaId?: string; svg?: string; ttlS?: number; message?: string }
+      | null;
+    if (res.ok && body?.ok && typeof body.captchaId === 'string' && typeof body.svg === 'string') {
+      return {
+        ok: true,
+        challenge: {
+          captchaId: body.captchaId,
+          svg: body.svg,
+          ttlMs: typeof body.ttlS === 'number' ? body.ttlS * 1000 : 600_000,
+        },
+      };
+    }
+    return {
+      ok: false,
+      message: body?.message || `验证码获取失败（HTTP ${res.status}）`,
+    };
+  } catch {
+    return {
+      ok: false,
+      message: '无法连接认证服务：请确认后端已启动',
+    };
+  }
+}
+
+/**
+ * 用「口令 + 验证码」登录。
+ *
+ * 验证码是一次性的：登录失败后前端必须重新拉取（服务端已作废该 id）。
  * 网络失败（后端不可达）归一化为 ok:false —— 门禁是 fail-closed 的：
  * 后端不可用时宁可显示"服务不可用"，也不放行。
  */
-export async function login(password: string): Promise<LoginOutcome> {
+export async function login(
+  password: string,
+  captcha: { id: string; code: string },
+): Promise<LoginOutcome> {
   try {
     const res = await fetch(`${API_BASE}auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({
+        password,
+        captchaId: captcha.id,
+        captchaCode: captcha.code,
+      }),
     });
     const body = (await res.json().catch(() => null)) as
       | { ok?: boolean; token?: string; expiresAt?: number; message?: string }

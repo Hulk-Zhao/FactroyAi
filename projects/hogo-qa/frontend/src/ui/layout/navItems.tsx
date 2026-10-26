@@ -15,7 +15,6 @@ import {
   Description as DescriptionIcon,
   SmartToy as SmartToyIcon,
   Settings as SettingsIcon,
-  AutoAwesome as SampleDataIcon,
 } from '@mui/icons-material';
 
 export interface NavItem {
@@ -32,7 +31,6 @@ export interface NavItem {
 /** 全部导航项（顺序即侧栏顺序）。 */
 export const NAV_ITEMS: NavItem[] = [
   { path: '/import', label: '数据导入', icon: <UploadFileIcon />, implemented: true },
-  { path: '/samples', label: '样例数据', icon: <SampleDataIcon />, implemented: true },
   { path: '/capability', label: '能力分析', icon: <AssessmentIcon />, implemented: true },
   { path: '/control-chart', label: '控制图', icon: <ShowChartIcon />, implemented: true },
   { path: '/pareto', label: '柏拉图', icon: <BarChartIcon />, implemented: true },

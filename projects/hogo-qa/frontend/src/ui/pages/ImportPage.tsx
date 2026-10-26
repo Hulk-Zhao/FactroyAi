@@ -7,7 +7,8 @@
  * 1. 拖拽区 + 粘贴 CSV 页签；
  * 2. 导入后展示表头 / 列映射预览（可手改）；
  * 3. 校验结果区（特性数 / 测量数 / 缺陷类型数 / 剔除空值数）；
- * 4. 旧格式自动识别（别名表匹配，免改列名）。
+ * 4. 旧格式自动识别（别名表匹配，免改列名）；
+ * 5. 内置样例数据区（一键载入 / 下载 XLSX；原独立「样例数据」页已并入本页）。
  *
  * T02/T03 对接：解析全部改由真实数据层 `@/data/importer` 提供
  * （`parseXlsx` / `parseCsv` / `parseClipboard` + `autoMapColumns` + `buildModel`），
@@ -44,8 +45,12 @@ import {
   PlayArrow as PlayArrowIcon,
   Download as DownloadIcon,
 } from '@mui/icons-material';
+import ReactECharts from 'echarts-for-react';
+import type { EChartsOption } from 'echarts';
 import { useNavigate } from 'react-router-dom';
 import type { ReactElement } from 'react';
+import { capabilityGrade, computeCapability, buildSubgroups } from '@/core';
+import type { SpecLimits } from '@/core';
 import { useProjectStore, type ImportValidation } from '@/store/projectStore';
 import { useUiStore } from '@/store/uiStore';
 import { useProjectPersistence } from '@/ui/hooks/useProjectPersistence';
@@ -65,6 +70,7 @@ import {
   downloadSampleXlsx,
   type SampleDatasetSpec,
 } from '@/data/samples/sampleDatasets';
+import { generateSampleValues } from '@/data/samples/sampleGenerator';
 
 /** 页面局部状态：解析后的表 + 映射。 */
 interface ParsedState {
@@ -412,7 +418,7 @@ export default function ImportPage(): ReactElement {
         </CardContent>
       </Card>
 
-      <Accordion variant="outlined" data-testid="sample-section">
+      <Accordion variant="outlined" data-testid="sample-section" defaultExpanded>
         <AccordionSummary expandIcon={<ExpandMoreIcon />}>
           <Stack direction="row" spacing={1} alignItems="center">
             <PlayArrowIcon color="primary" fontSize="small" />
@@ -423,6 +429,10 @@ export default function ImportPage(): ReactElement {
           </Stack>
         </AccordionSummary>
         <AccordionDetails>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            内置 3 组合成数据（不含任何真实产线数据），覆盖能力充足 / 临界 / 漂移超差三类典型场景。
+            卡片上的每个 Cpk/Ppk 都由统计内核实时计算，与正式分析同一条代码路径；也可「下载 XLSX」后回灌本页复算验证。
+          </Typography>
           <Box
             sx={{
               display: 'grid',
@@ -597,7 +607,97 @@ export default function ImportPage(): ReactElement {
   );
 }
 
-/** 样例数据卡片（导入页内嵌版）。 */
+/** 能力等级 → 展示色（与 verdict 语义对齐）。 */
+const GRADE_COLOR: Record<string, string> = {
+  excellent: '#2e7d32',
+  qualified: '#1565c0',
+  low: '#ed6c02',
+  fail: '#d32f2f',
+  unknown: '#9e9e9e',
+};
+
+/** 单特性的预计算结果（卡片渲染输入）。 */
+interface CharacteristicPreview {
+  name: string;
+  unit: string;
+  values: number[];
+  lsl: number;
+  usl: number;
+  cpk: number | null;
+  ppk: number | null;
+  grade: string;
+}
+
+/**
+ * 样例预览的子组容量：与能力分析页默认口径一致
+ * （`analysisStore.DEFAULT_CAPACITY` = 5、`samples/verify.ts` 同值），
+ * 保证「卡片上的数字 = 载入后能力分析页看到的数字」。
+ */
+const PREVIEW_SUBGROUP_CAPACITY = 5;
+
+/** 预计算一个样例的全部特性（含 Cpk/Ppk，纯统计内核，无 DOM）。 */
+function previewCharacteristics(spec: SampleDatasetSpec): CharacteristicPreview[] {
+  return spec.characteristics.map((plan) => {
+    const values = generateSampleValues(plan);
+    const specLimits: SpecLimits = {
+      usl: plan.usl,
+      lsl: plan.lsl,
+      target: plan.target ?? (plan.usl + plan.lsl) / 2,
+      unit: plan.unit,
+    };
+    const subgroups = buildSubgroups(
+      values.map((value, i) => ({ id: `m${i}`, value, excluded: false })),
+      { mode: 'fixed', capacity: PREVIEW_SUBGROUP_CAPACITY },
+    );
+    const cap = computeCapability(values, specLimits, subgroups, { sigmaMode: 'R' });
+    return {
+      name: plan.name,
+      unit: plan.unit,
+      values,
+      lsl: plan.lsl,
+      usl: plan.usl,
+      cpk: cap.cpk,
+      ppk: cap.ppk,
+      grade: capabilityGrade(cap.cpk),
+    };
+  });
+}
+
+/** 迷你趋势图 option：序列线 + USL/LSL 虚线。 */
+function miniChartOption(p: CharacteristicPreview): EChartsOption {
+  return {
+    grid: { left: 6, right: 6, top: 10, bottom: 4, containLabel: false },
+    xAxis: { type: 'category', show: false, data: p.values.map((_, i) => i) },
+    yAxis: { type: 'value', show: false, scale: true },
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: unknown) => {
+        const list = params as Array<{ dataIndex: number }>;
+        const idx = Array.isArray(list) && list.length > 0 ? list[0].dataIndex : 0;
+        const v = p.values[idx];
+        return `#${idx + 1} · ${v} ${p.unit}`;
+      },
+    },
+    series: [
+      {
+        type: 'line',
+        data: p.values,
+        symbol: 'none',
+        lineStyle: { width: 1.5, color: '#5b8cff' },
+        areaStyle: { opacity: 0.08, color: '#5b8cff' },
+        markLine: {
+          silent: true,
+          symbol: 'none',
+          label: { show: false },
+          lineStyle: { type: 'dashed', color: '#d32f2f', width: 1 },
+          data: [{ yAxis: p.usl }, { yAxis: p.lsl }],
+        },
+      },
+    ],
+  };
+}
+
+/** 样例数据卡片（数据导入页内嵌版，承载原「样例数据」页的全部信息）。 */
 function SampleDataCard({ spec }: { spec: SampleDatasetSpec }): ReactElement {
   const navigate = useNavigate();
   const setDataset = useProjectStore((s) => s.setDataset);
@@ -605,11 +705,18 @@ function SampleDataCard({ spec }: { spec: SampleDatasetSpec }): ReactElement {
   const { persist } = useProjectPersistence();
   const [busy, setBusy] = useState(false);
 
+  const previews = useMemo(() => previewCharacteristics(spec), [spec]);
+  const measurementCount = previews.reduce((acc, p) => acc + p.values.length, 0);
+  const defectCount = spec.defects?.length ?? 0;
+
+  /** 载入样例 → 新项目 → 落盘项目库 → 跳能力分析页。 */
   const handleLoad = async (): Promise<void> => {
     const dataset = buildSampleDataset(spec);
     setDataset(dataset);
     await persist({
-      successMessage: `已载入样例「${spec.title}」并保存到项目库`,
+      successMessage:
+        `已载入样例「${spec.title}」：${dataset.characteristics.length} 个特性 / ` +
+        `${measurementCount} 个测量点，已保存到项目库`,
     });
     navigate('/capability');
   };
@@ -618,7 +725,7 @@ function SampleDataCard({ spec }: { spec: SampleDatasetSpec }): ReactElement {
     setBusy(true);
     try {
       await downloadSampleXlsx(spec);
-      pushToast(`已生成 hogo-qa-sample-${spec.id}.xlsx`, 'success');
+      pushToast(`已生成 hogo-qa-sample-${spec.id}.xlsx（结构与导入格式一致，可直接回灌）`, 'success');
     } catch (e) {
       pushToast(`样例下载失败：${e instanceof Error ? e.message : String(e)}`, 'error');
     } finally {
@@ -627,19 +734,67 @@ function SampleDataCard({ spec }: { spec: SampleDatasetSpec }): ReactElement {
   };
 
   return (
-    <Card variant="outlined" sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 1 }}>
-      <Typography variant="subtitle2" fontWeight={700}>
-        {spec.title}
-      </Typography>
-      <Typography variant="caption" color="text.secondary">
-        {spec.scene}
-      </Typography>
-      <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
-        {spec.tags.map((t) => (
-          <Chip key={t} size="small" label={t} variant="outlined" />
+    <Card
+      variant="outlined"
+      sx={{ p: 2.5, display: 'flex', flexDirection: 'column', gap: 1.5, height: '100%' }}
+      data-testid={`sample-card-${spec.id}`}
+    >
+      <Box>
+        <Typography variant="subtitle1" fontWeight={700}>
+          {spec.title}
+        </Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+          {spec.scene}
+        </Typography>
+      </Box>
+
+      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+        <Chip size="small" label={`${spec.characteristics.length} 特性`} variant="outlined" />
+        <Chip size="small" label={`${measurementCount} 测量点`} variant="outlined" />
+        <Chip size="small" label={defectCount > 0 ? `${defectCount} 类不良` : '无不良数据'} variant="outlined" />
+      </Stack>
+
+      {/* 特性小图 + Cpk/Ppk 徽章（实时计算结果） */}
+      <Stack spacing={1}>
+        {previews.map((p) => (
+          <Box key={p.name} sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+            <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+              <ReactECharts
+                option={miniChartOption(p)}
+                style={{ height: 56, width: '100%' }}
+                notMerge
+                lazyUpdate
+                opts={{ renderer: 'svg' }}
+              />
+            </Box>
+            <Box sx={{ width: 168, flexShrink: 0 }}>
+              <Typography variant="caption" color="text.secondary" noWrap display="block">
+                {p.name}（{p.unit}）
+              </Typography>
+              <Typography variant="body2" fontWeight={700} sx={{ color: GRADE_COLOR[p.grade] ?? GRADE_COLOR.unknown }}>
+                Cpk {p.cpk === null ? '—' : p.cpk.toFixed(2)}
+                <Typography component="span" variant="body2" sx={{ ml: 0.75, color: 'text.secondary' }} fontWeight={600}>
+                  Ppk {p.ppk === null ? '—' : p.ppk.toFixed(2)}
+                </Typography>
+              </Typography>
+              <Typography variant="caption" color="text.disabled" noWrap display="block">
+                USL {p.usl} · LSL {p.lsl}
+              </Typography>
+            </Box>
+          </Box>
         ))}
       </Stack>
-      <Stack direction="row" spacing={1} sx={{ mt: 'auto' }}>
+
+      {/* 演示要点 */}
+      <Box component="ul" sx={{ m: 0, pl: 4, color: 'text.secondary' }}>
+        {spec.details.map((d) => (
+          <Typography key={d} component="li" variant="body2" sx={{ mb: 0.25 }}>
+            {d}
+          </Typography>
+        ))}
+      </Box>
+
+      <Stack direction="row" spacing={1} sx={{ mt: 'auto', pt: 1 }}>
         <Button
           size="small"
           variant="contained"

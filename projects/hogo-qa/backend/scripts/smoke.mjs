@@ -3,10 +3,12 @@
  *
  * 覆盖：
  *   1. /api/health 健康检查；
- *   2. 登录：错误口令 401（含限流计数提示）、正确口令发 token；
- *   3. /api/auth/check：合法 token 200、伪造 token 401；
- *   4. 防刷限流：连续失败 RATE_MAX_FAILS 次后 429 锁定；
- *   5. 样例清单 API 鉴权：未登录 401、登录后 200。
+ *   2. 图形验证码：签发 200 + SVG、登录缺验证码 401、验证码一次性作废、大小写不敏感；
+ *   3. 登录：错误口令 401、正确口令 + 正确验证码发 token；
+ *   4. /api/auth/check：合法 token 200、伪造 token 401；
+ *   5. 防刷限流：连续失败 RATE_MAX_FAILS 次后 429 锁定；
+ *   6. 样例清单 API 鉴权：未登录 401、登录后 200；
+ *   7. 静态托管 + SPA 回退。
  *
  * 用法：node backend/scripts/smoke.mjs   （非 0 退出码 = 失败）
  */
@@ -28,6 +30,7 @@ writeFileSync(join(process.env.STATIC_DIR, 'index.html'), '<!doctype html><title
 
 const { createAppServer } = await import('../server.mjs');
 const config = (await import('../lib/config.mjs')).config;
+const { peekCaptchaAnswer } = await import('../lib/captcha.mjs');
 
 const server = createAppServer();
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -44,6 +47,34 @@ async function call(pathname, opts = {}) {
   return { status: res.status, body, headers: res.headers };
 }
 
+let ipSeq = 0;
+/** 每个用例独立 IP，避免用例之间互相消耗失败次数 / 触发锁定。 */
+function nextIp() {
+  ipSeq += 1;
+  return `10.0.0.${ipSeq}`;
+}
+
+/** 取一张验证码；答案只存在于服务端，测试进程内直接读（HTTP 应答不回明文）。 */
+async function getCaptcha(ip = nextIp()) {
+  const r = await call('/api/auth/captcha', { headers: { 'X-Forwarded-For': ip } });
+  assert.equal(r.status, 200, `验证码签发应 200，实际 ${r.status}`);
+  assert.ok(r.body.captchaId, '应返回 captchaId');
+  assert.ok(typeof r.body.svg === 'string' && r.body.svg.includes('<svg'), '应返回 SVG');
+  assert.equal(r.body.ttlS, Math.round(config.captchaTtlMs / 1000));
+  const answer = peekCaptchaAnswer(r.body.captchaId);
+  assert.match(String(answer), /^[2-9A-HJ-NP-Z]{4}$/, `验证码答案格式异常：${answer}`);
+  return { ip, id: r.body.captchaId, answer, raw: r.body };
+}
+
+/** 带 IP 的登录调用。 */
+async function loginWith(ip, payload) {
+  return call('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': ip },
+    body: JSON.stringify(payload),
+  });
+}
+
 let passed = 0;
 async function check(name, fn) {
   await fn();
@@ -58,22 +89,53 @@ try {
     assert.equal(r.body.ok, true);
   });
 
-  await check('POST login 错误口令 → 401', async () => {
-    const r = await call('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: 'wrong' }),
+  await check('GET /api/auth/captcha → 200 + SVG（一次性答案不回显）', async () => {
+    const cap = await getCaptcha();
+    assert.ok(!JSON.stringify(cap.raw).includes(cap.answer), '答案不应出现在签发响应里');
+  });
+
+  await check('POST login 缺少验证码 → 401（验证码必填）', async () => {
+    const ip = nextIp();
+    const r = await loginWith(ip, { password: config.authPassword });
+    assert.equal(r.status, 401);
+    assert.ok(r.body.message.includes('验证码'), `应提示验证码，实际：${r.body.message}`);
+  });
+
+  await check('验证码一次性：登录成功后复用同一 id → 401', async () => {
+    const cap = await getCaptcha();
+    const first = await loginWith(cap.ip, {
+      password: config.authPassword,
+      captchaId: cap.id,
+      captchaCode: cap.answer,
+    });
+    assert.equal(first.status, 200);
+    const replay = await loginWith(cap.ip, {
+      password: config.authPassword,
+      captchaId: cap.id,
+      captchaCode: cap.answer,
+    });
+    assert.equal(replay.status, 401);
+    assert.ok(replay.body.message.includes('验证码'), `应提示验证码失效，实际：${replay.body.message}`);
+  });
+
+  await check('验证码大小写不敏感 + 错误口令 → 401', async () => {
+    const cap = await getCaptcha();
+    const r = await loginWith(cap.ip, {
+      password: 'wrong',
+      captchaId: cap.id,
+      captchaCode: cap.answer.toLowerCase(),
     });
     assert.equal(r.status, 401);
-    assert.equal(r.body.ok, false);
+    assert.ok(r.body.message.includes('口令'), `应提示口令错误，实际：${r.body.message}`);
   });
 
   let token = '';
-  await check('POST login 正确口令 → 200 + token', async () => {
-    const r = await call('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: config.authPassword }),
+  await check('POST login 正确口令 + 正确验证码 → 200 + token', async () => {
+    const cap = await getCaptcha();
+    const r = await loginWith(cap.ip, {
+      password: config.authPassword,
+      captchaId: cap.id,
+      captchaCode: cap.answer,
     });
     assert.equal(r.status, 200);
     assert.ok(r.body.token && r.body.token.includes('.'));
@@ -103,20 +165,22 @@ try {
   });
 
   await check('防刷限流：连续失败达上限 → 429 锁定', async () => {
-    // 正确口令登录已把失败计数清零，此后需连续失败 RATE_MAX_FAILS（=3）次：
-    // 前两次 401，第 3 次触发 429 锁定；锁定期间口令正确也 429。
-    const login = { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: 'x' }) };
-    const r1 = await call('/api/auth/login', login);
+    // 独立 IP：缺验证码的失败同样计数。RATE_MAX_FAILS=3 → 前两次 401，第 3 次 429；
+    // 锁定期间即使口令+验证码齐全也 429。
+    const ip = nextIp();
+    const bad = { password: 'x' };
+    const r1 = await loginWith(ip, bad);
     assert.equal(r1.status, 401);
-    const r2 = await call('/api/auth/login', login);
+    const r2 = await loginWith(ip, bad);
     assert.equal(r2.status, 401);
-    const r3 = await call('/api/auth/login', login);
+    const r3 = await loginWith(ip, bad);
     assert.equal(r3.status, 429, `第 3 次失败应触发 429，实际 ${r3.status}`);
     assert.ok(r3.body.message.includes('锁定'));
-    const r4 = await call('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: config.authPassword }),
+    const cap = await getCaptcha();
+    const r4 = await loginWith(ip, {
+      password: config.authPassword,
+      captchaId: cap.id,
+      captchaCode: cap.answer,
     });
     assert.equal(r4.status, 429, '锁定期间即使口令正确也应 429');
   });

@@ -6,13 +6,15 @@
  * - 无状态会话：HMAC-SHA256 签名的 token（payload 只有签发/过期时间），
  *   服务端不存 session 表；密钥可由环境变量注入，缺省自动生成并持久化，
  *   重启不掉线、多 worker 可共用（读同一文件）。
- * - 防刷：按 IP 记连续失败次数，超限锁定；失败响应固定延迟拖慢爆破。
+ * - 防刷：登录前必须通过一次性图形验证码（见 captcha.mjs），再按 IP 记连续
+ *   失败次数，超限锁定；失败响应固定延迟拖慢爆破。
  *   纯内存实现（重启清零），演示场景足够且不引入存储依赖。
  */
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { verifyCaptcha } from './captcha.mjs';
 import { config } from './config.mjs';
 
 /* ---------------- HMAC 会话 token ---------------- */
@@ -113,8 +115,12 @@ function resetFails(ip) {
 
 /**
  * 处理登录：成功返回 { ok, token, expiresAt }；失败返回 { ok:false, status, message, retryAfterMs? }。
+ *
+ * 校验顺序：IP 锁定 → 一次性图形验证码 → 口令。验证码**无论对错都作废**，
+ * 且失败同样计入连续失败次数（否则可绕开限流爆破验证码）。
+ *
  * @param {string} ip 客户端 IP（取最外层，反代场景由 server.mjs 解析 x-forwarded-for）
- * @param {unknown} body 请求体（期望 { password }）
+ * @param {unknown} body 请求体（期望 { password, captchaId, captchaCode }）
  */
 export async function handleLogin(ip, body) {
   const now = Date.now();
@@ -129,15 +135,24 @@ export async function handleLogin(ip, body) {
     };
   }
 
-  const password = body && typeof body === 'object' ? body.password : undefined;
+  const { captchaId, captchaCode, password } =
+    body && typeof body === 'object' ? body : {};
+  const captcha = verifyCaptcha(captchaId, captchaCode);
+  if (!captcha.ok) {
+    return recordFailure(state, now, captcha.message);
+  }
+
   if (typeof password === 'string' && password === config.authPassword) {
     resetFails(ip);
     const { token, expiresAt } = issueToken(now);
     return { ok: true, token, expiresAt };
   }
 
-  // 失败：计数 + 锁定判定 + 固定延迟（不暴露"密码对但被锁"与"密码错"的差别太细，
-  // 统一 401；锁定中才是 429）。
+  return recordFailure(state, now, '口令不正确');
+}
+
+/** 记一次失败：计数 + 锁定判定 + 固定延迟（统一 401；锁定中才是 429）。 */
+async function recordFailure(state, now, reason) {
   state.fails += 1;
   state.lastFail = now;
   if (state.fails >= config.rateMaxFails) {
@@ -152,7 +167,11 @@ export async function handleLogin(ip, body) {
   if (config.loginDelayMs > 0) {
     await new Promise((r) => setTimeout(r, config.loginDelayMs));
   }
-  return { ok: false, status: 401, message: `口令不正确（剩余尝试次数 ${config.rateMaxFails - state.fails}）` };
+  return {
+    ok: false,
+    status: 401,
+    message: `${reason}（剩余尝试次数 ${config.rateMaxFails - state.fails}）`,
+  };
 }
 
 /** 测试辅助：清空限流状态。 */

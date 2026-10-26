@@ -15,7 +15,6 @@ import Sidebar from './Sidebar';
 import TopBar from './TopBar';
 import { DEFAULT_ROUTE } from './navItems';
 import ImportPage from '@/ui/pages/ImportPage';
-import SampleDataPage from '@/ui/pages/SampleDataPage';
 import CapabilityPage from '@/ui/pages/CapabilityPage';
 import ControlChartPage from '@/ui/pages/ControlChartPage';
 import ParetoPage from '@/ui/pages/ParetoPage';
@@ -55,7 +54,6 @@ export default function AppShell(): ReactElement {
             <Routes>
               <Route path="/" element={<Navigate to={DEFAULT_ROUTE} replace />} />
               <Route path="/import" element={<ImportPage />} />
-              <Route path="/samples" element={<SampleDataPage />} />
               <Route path="/capability" element={<CapabilityPage />} />
               <Route path="/pareto" element={<ParetoPage />} />
               <Route path="/control-chart" element={<ControlChartPage />} />

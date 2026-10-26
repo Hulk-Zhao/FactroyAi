@@ -3,7 +3,8 @@
  *
  * 职责：
  *   1. 托管前端构建产物（frontend/dist-server，SPA history 回退）；
- *   2. 演示登录鉴权 API：POST /api/auth/login（口令 + 按 IP 限流防刷）、
+ *   2. 演示登录鉴权 API：GET /api/auth/captcha（一次性图形验证码，按 IP 限速）、
+ *      POST /api/auth/login（验证码 + 口令 + 按 IP 限流防刷）、
  *      GET /api/auth/check、POST /api/auth/logout；
  *   3. 样例数据 API：GET /api/samples、GET /api/samples/:file/download；
  *   4. GET /api/health 健康检查（公网探测 / 反代探活用）。
@@ -14,6 +15,7 @@
 import { createServer } from 'node:http';
 import { config } from './lib/config.mjs';
 import { getSecret, handleLogin, verifyToken } from './lib/auth.mjs';
+import { checkCaptchaRate, issueCaptcha } from './lib/captcha.mjs';
 import { securityHeaders, serveStatic } from './lib/static.mjs';
 import { listSamples, readSampleFile } from './lib/samples.mjs';
 
@@ -78,6 +80,18 @@ async function handleApi(req, res, pathname) {
 
   if (pathname === '/api/health' && method === 'GET') {
     sendJson(res, 200, { ok: true, name: 'hogo-qa-backend', time: new Date().toISOString() });
+    return true;
+  }
+
+  if (pathname === '/api/auth/captcha' && method === 'GET') {
+    // 签发一次性图形验证码：按 IP 限速，防被刷爆内存/带宽。
+    if (!checkCaptchaRate(clientIp(req))) {
+      sendJson(res, 429, { ok: false, message: '验证码获取过于频繁，请稍后再试' });
+      return true;
+    }
+    const { id, svg } = issueCaptcha();
+    res.setHeader('Cache-Control', 'no-store');
+    sendJson(res, 200, { ok: true, captchaId: id, svg, ttlS: Math.round(config.captchaTtlMs / 1000) });
     return true;
   }
 

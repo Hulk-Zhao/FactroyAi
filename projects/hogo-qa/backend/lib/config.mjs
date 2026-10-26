@@ -52,6 +52,10 @@ export const config = {
   rateLockMs: num('RATE_LOCK_MINUTES', 10) * 60_000,
   /** 登录失败固定延迟（毫秒）。 */
   loginDelayMs: num('LOGIN_DELAY_MS', 600),
+  /** 图形验证码有效期（毫秒）。 */
+  captchaTtlMs: num('CAPTCHA_TTL_SECONDS', 600) * 1000,
+  /** 同一 IP 每分钟验证码签发上限。 */
+  captchaRateLimit: num('CAPTCHA_RATE_LIMIT', 30),
   /** 前端构建产物目录（相对 backend/ 或绝对路径）。 */
   get staticDir() {
     const raw = process.env.STATIC_DIR || '../frontend/dist-server';
