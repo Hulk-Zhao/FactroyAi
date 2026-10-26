@@ -1,0 +1,27 @@
+# 指标库 v1（Text2SQLService 第①道通道：指标定义即代码，口径唯一）。
+# 铁律：智能体优先查指标库，禁止各自写口径（ARCHITECTURE-V2.md §5.2）。
+metrics:
+  - id: otd_rate
+    name: OTD 准时交付率
+    owner: 供应链域
+    # 2026-10-20 口径修正：原定义查 shipment（4 行演示小表）且把「在途且未逾期」
+    # 记为按时，`eta >= date('now')` 恒不命中 → 直答恒为 0.0%，与订单履约看板
+    # 的 OTD（68~70%）自相矛盾。现对齐看板口径：order_fulfillment.on_time
+    # （准时 = 实际发货日 ≤ 客户要求交付日），窗口按 due_date 归属。
+    desc: "准时交付（实际发货日 ≤ 客户要求交付日）订单数 ÷ 窗口内订单总数；窗口按客户要求交付日 due_date 归属，与订单履约看板同源。"
+    tables: [order_fulfillment]
+    # 2026-10-22：补「准交率 / 准交」——岗位推荐问题「这个月准交率完成多少」原本
+    # 匹配不到指标，掉进明细探查由模型现写 SQL，真机返回 otd_rate=0.0（与看板
+    # 68% 自相矛盾）。补词后同一问题稳定走指标库（与看板同源口径）。
+    keywords: [OTD, 准时交付, 交付率, 订单达成, 准交率, 准交, 交期达成]
+    # :start / :end = 统计窗口（Text2SQLService 按问题里的「当日/当月/最近7天」解析，
+    # 缺省回落最近 7 天；窗口定义与 dashboard.resolve_window 同源）。
+    sql: "SELECT ROUND(100.0 * SUM(on_time) / COUNT(*), 1) AS otd_rate_pct, SUM(on_time) AS on_time_orders, COUNT(*) AS total_orders FROM order_fulfillment WHERE due_date BETWEEN :start AND :end"
+    unit: "%"
+    higher_is_better: true
+    target: 98.0
+    # 结果列 → 业务列名（直答的表格与结论用业务语言呈现，不暴露 SQL 别名）
+    columns:
+      - {key: otd_rate_pct, label: "OTD 准时交付率", unit: "%", primary: true}
+      - {key: on_time_orders, label: "准时交付订单数", unit: "单"}
+      - {key: total_orders, label: "订单总数", unit: "单"}

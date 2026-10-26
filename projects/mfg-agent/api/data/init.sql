@@ -1,0 +1,219 @@
+-- ============================================================
+-- mfg_agent 库初始化：模拟 MES / QMS / SCM / EAM / WMS / TMS
+-- 覆盖5个演示场景的数据
+-- ============================================================
+CREATE DATABASE IF NOT EXISTS mfg_agent DEFAULT CHARSET utf8mb4;
+USE mfg_agent;
+
+-- 1. MES：生产产出与OEE
+DROP TABLE IF EXISTS production_output;
+CREATE TABLE production_output (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  record_date DATE,
+  line_code VARCHAR(20),
+  product_model VARCHAR(50),
+  planned_qty INT,
+  actual_qty INT,
+  oee DECIMAL(5,2),
+  stop_duration_min INT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 2. 停线事件
+DROP TABLE IF EXISTS line_stop_event;
+CREATE TABLE line_stop_event (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  line_code VARCHAR(20),
+  product_model VARCHAR(50),
+  start_time DATETIME,
+  end_time DATETIME NULL,
+  stop_code VARCHAR(30),
+  root_cause VARCHAR(200),
+  status VARCHAR(20)
+);
+
+-- 3. QMS：品质不良
+DROP TABLE IF EXISTS quality_defect;
+CREATE TABLE quality_defect (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  batch_no VARCHAR(30),
+  product_model VARCHAR(50),
+  line_code VARCHAR(20),
+  defect_type VARCHAR(50),
+  defect_qty INT,
+  total_qty INT,
+  inspect_time DATETIME,
+  process_stage VARCHAR(20),
+  defect_category VARCHAR(20),
+  product_category VARCHAR(20)
+);
+
+-- 4. SCM：来料批次
+DROP TABLE IF EXISTS material_batch;
+CREATE TABLE material_batch (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  batch_no VARCHAR(30),
+  part_no VARCHAR(50),
+  part_name VARCHAR(100),
+  supplier VARCHAR(50),
+  incoming_result VARCHAR(20),
+  coa_url VARCHAR(200),
+  arrival_time DATETIME
+);
+
+-- 5. EAM：设备日志
+DROP TABLE IF EXISTS equipment_log;
+CREATE TABLE equipment_log (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  equipment_id VARCHAR(30),
+  line_code VARCHAR(20),
+  log_time DATETIME,
+  alarm_code VARCHAR(20),
+  param_name VARCHAR(50),
+  param_value VARCHAR(100),
+  is_abnormal TINYINT
+);
+
+-- 6. WMS：库存
+DROP TABLE IF EXISTS inventory;
+CREATE TABLE inventory (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  product_model VARCHAR(50),
+  warehouse VARCHAR(30),
+  on_hand_qty INT,
+  reserved_qty INT,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 7. TMS：发货/在途
+DROP TABLE IF EXISTS shipment;
+CREATE TABLE shipment (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  order_no VARCHAR(30),
+  product_model VARCHAR(50),
+  qty INT,
+  ship_status VARCHAR(20),
+  eta DATETIME,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 8. 客户投诉
+DROP TABLE IF EXISTS customer_complaint;
+CREATE TABLE customer_complaint (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  complaint_no VARCHAR(30),
+  customer VARCHAR(50),
+  product_model VARCHAR(50),
+  batch_no VARCHAR(30),
+  defect_desc VARCHAR(500),
+  status VARCHAR(20),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 企业制度库（kbqa_policy）：16 类制造企业制度的 MySQL 结构化镜像
+-- 行数据由 seed_kbqa.sql 装载（docker-entrypoint-initdb.d）
+CREATE TABLE kbqa_policy (
+  id INT PRIMARY KEY,
+  dept VARCHAR(40),
+  dept_cn VARCHAR(30),
+  policy_no VARCHAR(30),
+  category VARCHAR(30),
+  title VARCHAR(100),
+  content TEXT,
+  keywords VARCHAR(200)
+);
+
+-- ============================================================
+-- 企业问答助手 FAQ 前置层（ADR-001 L1 数据面）
+-- kbqa_faq = 晋升/人工维护的问答对；kbqa_faq_draft = 待审草稿；
+-- kbqa_query_log = 查询度量（channel 分布 / 低置信占比 / 待晋升取数）。
+-- 纪律：晋升只写 kbqa_faq，**不碰 kbqa_policy 制度主数据**。
+-- ============================================================
+CREATE TABLE IF NOT EXISTS kbqa_faq (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  question TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  keywords VARCHAR(200),
+  origin VARCHAR(32) NOT NULL DEFAULT 'manual',
+  source_ref VARCHAR(60),
+  dept VARCHAR(40),
+  dept_cn VARCHAR(30),
+  status VARCHAR(16) NOT NULL DEFAULT 'active',
+  created_by VARCHAR(64),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS kbqa_faq_draft (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  question TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  origin VARCHAR(32) NOT NULL DEFAULT 'rag_feedback',
+  query_log_id BIGINT,
+  status VARCHAR(16) NOT NULL DEFAULT 'pending',
+  reviewer VARCHAR(64),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS kbqa_query_log (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  session_id VARCHAR(36),
+  question TEXT NOT NULL,
+  channel VARCHAR(16) NOT NULL,
+  confidence REAL,
+  top_score REAL,
+  latency_ms INTEGER,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================================
+-- 模拟数据（以2026-10-15为"今天"）
+-- ============================================================
+
+-- 场景1：A型号 SMT-1线 14:30停线，OEE暴跌
+INSERT INTO production_output VALUES
+ (1,'2026-10-15','SMT-1','A型号',5000,5000,86.20,0,'2026-10-15 14:00:00'),
+ (2,'2026-10-15','SMT-1','A型号',5000,1800,32.10,150,'2026-10-15 16:30:00'),
+ (3,'2026-10-15','DIP-2','B型号',3000,2950,84.50,10,'2026-10-15 16:30:00');
+
+INSERT INTO line_stop_event VALUES
+ (1,'SMT-1','A型号','2026-10-15 14:30:00',NULL,'EQUIPMENT','待分析','ongoing');
+
+-- 品质：锡膏印刷偏移集中不良
+INSERT INTO quality_defect VALUES
+ (1,'BATCH-A-1015','A型号','SMT-1','锡膏偏移',32,500,'2026-10-15 14:35:00',NULL,NULL,NULL),
+ (2,'BATCH-A-1015','A型号','SMT-1','锡膏偏移',45,500,'2026-10-15 15:10:00',NULL,NULL,NULL),
+ (3,'BATCH-A-1015','A型号','SMT-1','连锡',8,500,'2026-10-15 15:40:00',NULL,NULL,NULL),
+ (4,'BATCH-B-1014','B型号','DIP-2','虚焊',3,300,'2026-10-15 10:00:00',NULL,NULL,NULL),
+ -- S3 客诉批次 BATCH-A-1008 的过程不良（8D D4）；line_code=SMT-2，
+ -- 不影响 line_stop 的 SMT-1/A型号不良分布聚合（回归红线）
+ (5,'BATCH-A-1008','A型号','SMT-2','贴片偏移',46,2000,'2026-10-12 10:00:00',NULL,NULL,NULL);
+
+-- 供应链：当日锡膏批次COA正常
+INSERT INTO material_batch VALUES
+ (1,'MAT-SP-1015','SP-001','无铅锡膏SAC305','千住金属','pass','http://coa.example.com/sp1015.pdf','2026-10-15 08:00:00'),
+ (2,'MAT-PCB-1013','PCB-022','A型号PCB','深南电路','pass','http://coa.example.com/pcb1013.pdf','2026-10-13 09:00:00'),
+ (3,'MAT-IC-1012','IC-100','主控芯片','STMicroelectronics','pass','http://coa.example.com/ic1012.pdf','2026-10-12 11:00:00'),
+ -- 数据红线（§0.2）：新增批次 arrival_time **必须避开 '2026-10-15'**
+ (4,'MAT-SP-1014','SP-001','无铅锡膏SAC305','千住金属','fail','http://coa.example.com/sp1014.pdf','2026-10-14 08:00:00'),
+ (5,'MAT-IC-1011','IC-100','主控芯片','STMicroelectronics','fail','http://coa.example.com/ic1011.pdf','2026-10-11 11:00:00'),
+ (6,'BATCH-A-1008','PCB-022','A型号PCB','深南电路','pass','http://coa.example.com/pcb1008.pdf','2026-10-12 09:00:00');
+
+-- 设备：印刷机参数异常
+INSERT INTO equipment_log VALUES
+ (1,'PRT-01','SMT-1','2026-10-15 14:28:00','E-201','刮刀压力','0.8MPa（基准0.5）',1),
+ (2,'PRT-01','SMT-1','2026-10-15 14:29:00','E-205','钢网清洁周期','15min（基准4h）',1),
+ (3,'OVN-02','SMT-1','2026-10-15 14:31:00','E-301','回流温区3','245℃（基准235±5）',1),
+ (4,'PRT-01','SMT-1','2026-10-15 09:00:00','I-001','开机自检','pass',0);
+
+-- 场景4：库存与发货
+INSERT INTO inventory VALUES
+ (1,'A型号','深圳成品仓',1200,800,'2026-10-15 16:00:00'),
+ (2,'B型号','深圳成品仓',5000,500,'2026-10-15 16:00:00');
+
+INSERT INTO shipment VALUES
+ (1,'SO-20261015-01','A型号',2000,'待发货','2026-10-17 10:00:00','2026-10-15 16:00:00'),
+ (2,'SO-20261014-02','B型号',1000,'在途','2026-10-16 18:00:00','2026-10-15 12:00:00'),
+ -- S4 追加一单逾期风险订单（不改既有 2 单的 id 顺序）
+ (3,'SO-20261010-03','A型号',1500,'待发货','2026-10-14 10:00:00','2026-10-15 16:00:00');
+
+-- 场景3：客户投诉
+INSERT INTO customer_complaint VALUES
+ (1,'CS-20261012-01','华为终端','A型号','BATCH-A-1008','贴片元件偏移导致功能失效，不良率约2.3%','open','2026-10-12 09:00:00');

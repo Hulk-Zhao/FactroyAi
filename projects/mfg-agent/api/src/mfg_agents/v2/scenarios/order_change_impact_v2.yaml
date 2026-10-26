@@ -1,0 +1,97 @@
+# S5 订单变更影响评估（PRD-V3 场景探索落地）：插单/急单/订单变更 → 三域并行评估 → HITL 承诺
+#
+# 查询类场景：fan_out 无 condition（始终推进三分支），复用既有域 handler，零新增 handler。
+key: order_change_impact_v2
+name: 订单变更影响评估
+version: 1
+domains: [supply_chain, manufacturing]
+triggers:
+  - {type: keyword, words: [插单, 急单, 订单变更, 加急, 提前交货, 改期, 变更影响, 紧急订单]}
+  - {type: im_message}
+  - {type: event, topic: mfg.order.changed}
+entry: intake
+outputs: [atp_result, risk_list, change_ticket, internal_brief]
+
+hitl:
+  - {step: hitl_delivery_commit, approver_roles: [业务经理]}
+
+steps:
+  # 1) 业务意图识别（抽取型号/数量/期望交期实体）
+  - id: intake
+    type: agent
+    agent: business
+    label: 业务Agent · 意图识别
+    icon: "🧠"
+    timeout_s: 10
+    on_error: degrade
+
+  # 2) 三域并行评估（计划排产 / 物控齐套 / 制造产能）
+  #    分支与其余 5 场景同构：inline 声明 id + agent（DAG 执行器按 branch["id"] 注册节点）
+  - id: fanout
+    type: fan_out
+    join: all
+    timeout_s: 30
+    on_error: degrade
+    branches:
+      - id: planning
+        type: agent
+        agent: planning
+        label: 计划Agent · 排产影响
+        icon: "🗓️"
+        timeout_s: 15
+        on_error: degrade
+      - id: material_control
+        type: agent
+        agent: material_control
+        label: 物控Agent · 齐套评估
+        icon: "📦"
+        timeout_s: 15
+        on_error: degrade
+      - id: manufacturing
+        type: agent
+        agent: manufacturing
+        label: 制造Agent · 产能评估
+        icon: "🏭"
+        timeout_s: 15
+        on_error: degrade
+
+  # 3) 影响汇聚
+  - id: fanin
+    type: fan_in
+    timeout_s: 5
+    on_error: degrade
+
+  # 4) 变更影响工单（通知计划/物控/业务联动；workflow: 已注册的工作流工厂 key）
+  - id: change_flow
+    type: workflow
+    workflow: order_change_flow
+    title: 订单变更影响评估工单
+    assignees: [计划, 物控, 业务经理]
+    notify_level: P2
+    sla_hours: 4
+    timeout_s: 10
+    on_error: degrade
+
+  # 5) HITL：插单/变更承诺必须业务经理人工确认（绝不自动放行）。
+  #    槽位复用 delivery_commit（交期承诺语义一致：业务经理发起 + 计划会签）
+  - id: hitl_delivery_commit
+    type: hitl
+    agent: hitl_delivery_commit
+    approver_roles: [业务经理]
+    prompt: "订单变更影响已评估，请确认是否接受该插单/变更（含交期与产能影响）"
+    actions:
+      - {key: accept, label: 接受变更并承诺, propose: [业务经理], cosign: [计划], impact: "按评估交期承诺 · 需产能确认", followup: "锁定库存 / 通知物流"}
+      - {key: partial, label: 部分接受, propose: [业务经理], cosign: [计划, 物控], impact: "先保重点客户 · 其余顺延", followup: "拆分订单 / 重排产"}
+      - {key: escalate, label: 升级销售总监, propose: [业务经理], impact: "重大客户/重大变更 · 高层决策", followup: "升级工单"}
+    sla_hours: 4
+    timeout_s: 5
+    on_error: degrade
+
+  # 6) 简报（change 场景专属报告 handler：排产/齐套/产能三项，不套用停线口径）
+  - id: report
+    type: agent
+    agent: report_order_change
+    label: 报告Agent · 变更影响简报
+    icon: "📄"
+    timeout_s: 60
+    on_error: degrade

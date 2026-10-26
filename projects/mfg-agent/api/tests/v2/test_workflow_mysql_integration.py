@@ -1,0 +1,290 @@
+"""MySQL 真库集成：显式注入 SQLAlchemy 仓储后的完整治理链。
+
+默认跳过（CI 无 MySQL）；本地验证方式：
+
+    MFG_MYSQL_TEST_URL=mysql+pymysql://root:demo123@127.0.0.1:3307/mfg_agent_test \
+        uv run python -m pytest tests/v2/test_workflow_mysql_integration.py -q
+
+测试只使用传入 URL 指向的**一次性库**，结束后清理自己创建的行。
+"""
+from __future__ import annotations
+
+import os
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+from sqlalchemy import text
+
+import mfg_agents.v2 as v2_pkg
+from mfg_agents.v2.contracts.permissions import reset_permission_registry
+from mfg_agents.v2.core.orchestrator import build_workflow_engine
+from mfg_agents.v2.services import procurement_followup as followup_svc
+from mfg_agents.v2.services import report_store, site_board
+from mfg_agents.v2.services.report_repository_sqlalchemy import (
+    SQLAlchemyReportRepository,
+)
+from mfg_agents.v2.services.site_board_repository_sqlalchemy import (
+    SQLAlchemySiteBoardRepository,
+)
+from mfg_agents.v2.services.workflow import WorkflowEngine
+from mfg_agents.v2.services.workflow_repository_sqlalchemy import (
+    SQLAlchemyWorkflowRepository,
+)
+
+MYSQL_URL = os.getenv("MFG_MYSQL_TEST_URL", "").strip()
+pytestmark = pytest.mark.skipif(
+    not MYSQL_URL,
+    reason="需要 MFG_MYSQL_TEST_URL 指向一次性 MySQL 库（例如 mfg_agent_test）")
+
+SCENARIO_DIR = Path(v2_pkg.__file__).resolve().parent / "scenarios"
+
+SQE_CTX: dict[str, Any] = {"user_id": "u-sqe", "dept": "quality", "roles": ["quality"]}
+PQE_CTX: dict[str, Any] = {"user_id": "u-pqe", "dept": "quality", "roles": ["pqe"]}
+BIZ_CTX: dict[str, Any] = {"user_id": "u-biz", "dept": "sales", "roles": ["business"]}
+QA_CTX: dict[str, Any] = {"user_id": "u-qa", "dept": "quality", "roles": ["qa"]}
+QD_CTX: dict[str, Any] = {"user_id": "u-qd", "dept": "quality", "roles": ["质量总监"]}
+
+
+def _actions() -> list[dict[str, Any]]:
+    data = yaml.safe_load(
+        (SCENARIO_DIR / "incoming_quality_v2.yaml").read_text(encoding="utf-8"))
+    step = next(s for s in data["steps"] if s.get("id") == "hitl_disposition")
+    return step["actions"]
+
+
+def test_mysql_governed_flow_with_signoff_ledger():
+    reset_permission_registry()
+    repo = SQLAlchemyWorkflowRepository(MYSQL_URL)
+    engine = WorkflowEngine(MYSQL_URL, repository=repo)
+    task = engine.create_task(
+        wf_id="hitl_disposition", title="MySQL 治理链验证",
+        context={"run_id": "run-mysql", "slot": "disposition",
+                 "kind": "disposition", "actions": _actions()},
+        assignees=["SQE", "PQE", "生产"], hitl=True)
+    uid = task.task_uid
+    try:
+        engine.select_action(uid, "concession", "王倩", user_ctx=SQE_CTX,
+                             comment="加严检验 + 客户告知")
+        engine.cosign(uid, "王倩", user_ctx=PQE_CTX)
+        engine.cosign(uid, "陈昊", user_ctx=BIZ_CTX)
+        engine.cosign(uid, "李静", user_ctx=QA_CTX)
+        engine.approve(uid, "李静", user_ctx=QD_CTX, final=True,
+                       decision="特采（让步接收）")
+
+        assert engine.get(uid).status == "done"
+        rows = repo.list_signoffs(uid)
+        assert [r["verb"] for r in rows] == [
+            "cosign", "cosign", "cosign", "final_approve"]
+        assert {r["actor_id"] for r in rows[:3]} == {"u-pqe", "u-biz", "u-qa"}
+    finally:
+        with repo.engine.begin() as conn:
+            conn.execute(text("DELETE FROM wf_signoff WHERE task_uid = :u"),
+                         {"u": uid})
+            conn.execute(text(
+                "DELETE FROM platform_workflow_task WHERE task_uid = :u"),
+                {"u": uid})
+        repo.engine.dispose()
+
+
+def test_mysql_report_and_site_board_stores_use_sqlalchemy():
+    """同一 WORKFLOW_DB（MySQL）下，报告/推送仓储按方言自动分派。"""
+    assert isinstance(report_store._repo(MYSQL_URL), SQLAlchemyReportRepository)
+    assert isinstance(site_board._repo(MYSQL_URL), SQLAlchemySiteBoardRepository)
+
+    report_id = "rpt-mysql-it"
+    push_id = "sb-mysql-it"
+    try:
+        report_store.upsert_report({
+            "report_id": report_id,
+            "title": "MySQL 报告",
+            "scenario_key": "line_stop",
+            "status": "draft",
+            "internal_brief": {"summary": "x"},
+        }, db_path=MYSQL_URL)
+        assert report_store.get_report(report_id, db_path=MYSQL_URL)["title"] == "MySQL 报告"
+        rows, total = report_store.list_reports(q="MySQL 报告", db_path=MYSQL_URL)
+        assert total == 1 and rows[0]["report_id"] == report_id
+
+        site_board.push_message(
+            stage="SMT", title="MySQL 推送", complaint_no="C-MYSQL",
+            push_id=push_id, db_path=MYSQL_URL)
+        site_board.ack(push_id, actor="张三", note="已接收", db_path=MYSQL_URL)
+        pushes = site_board.list_pushes(stage="SMT", db_path=MYSQL_URL)
+        assert any(p["push_id"] == push_id and p["status"] == "acked"
+                   for p in pushes)
+    finally:
+        report_repo = SQLAlchemyReportRepository(MYSQL_URL)
+        with report_repo.engine.begin() as conn:
+            conn.execute(text("DELETE FROM report_record WHERE report_id = :r"),
+                         {"r": report_id})
+        report_repo.engine.dispose()
+        board_repo = SQLAlchemySiteBoardRepository(MYSQL_URL)
+        with board_repo.engine.begin() as conn:
+            conn.execute(text("DELETE FROM site_board_push WHERE push_id = :p"),
+                         {"p": push_id})
+        board_repo.engine.dispose()
+
+
+def test_mysql_runtime_factory_injects_sqlalchemy_repository():
+    """运行时装配入口：显式 WORKFLOW_DB=MySQL 时自动注入仓储。"""
+    engine = build_workflow_engine(MYSQL_URL)
+    assert isinstance(engine.repository, SQLAlchemyWorkflowRepository)
+    task = engine.create_task("wf-mysql-factory", "MySQL 装配入口")
+    try:
+        assert engine.get(task.task_uid).title == "MySQL 装配入口"
+    finally:
+        with engine.repository.engine.begin() as conn:
+            conn.execute(text(
+                "DELETE FROM platform_workflow_task WHERE task_uid = :u"),
+                {"u": task.task_uid})
+        engine.repository.engine.dispose()
+
+
+def test_mysql_followup_state_machine_and_writeback(tmp_path, monkeypatch):
+    """催交库切 MySQL：状态机 + 到货回执（审计台账走独立文件）。"""
+    outbox = tmp_path / "writeback_outbox.jsonl"
+    monkeypatch.setenv("MFG_WRITEBACK_OUTBOX", str(outbox))
+    work_order_set = "SET-MYSQL-IT"
+    gap = {"part_no": "MAT-MYSQL", "supplier": "SUP-MYSQL", "shortage_qty": 20}
+    repo = followup_svc._repo(MYSQL_URL)
+    try:
+        rows = followup_svc.dispatch_followups(
+            work_order_set, [gap], actor="采购员", db_path=MYSQL_URL)
+        fid = rows[0]["followup_id"]
+
+        followup_svc.transition(fid, "reply", actor="采购员",
+                                note="周五到 20 件", db_path=MYSQL_URL)
+        arrived = followup_svc.transition(
+            fid, "arrival", actor="采购员", arrival_qty=20, db_path=MYSQL_URL)
+        assert arrived["status"] == "arrival_confirmed"
+        assert arrived["writeback_receipt"]["status"] == "applied"
+        assert outbox.exists()
+
+        closed = followup_svc.transition(
+            fid, "close", actor="采购员", note="缺口已补齐", db_path=MYSQL_URL)
+        assert closed["status"] == "closed"
+        assert [r["followup_id"] for r in followup_svc.list_followups(
+            status="closed", db_path=MYSQL_URL)] == [fid]
+    finally:
+        if hasattr(repo, "engine"):
+            with repo.engine.begin() as conn:
+                conn.execute(text(
+                    "DELETE FROM procurement_followup WHERE work_order_set = :s"),
+                    {"s": work_order_set})
+            repo.engine.dispose()
+
+
+def test_mysql_data_source_readonly_contract():
+    """业务读路径：MySQLDataSource 只读契约 + 注册查询方言桥接。"""
+    from sqlalchemy import create_engine
+
+    from mfg_agents.v2.contracts.data_source import MySQLDataSource
+
+    engine = create_engine(MYSQL_URL)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS mfg_atp_demo"))
+            conn.execute(text(
+                "CREATE TABLE mfg_atp_demo ("
+                "product_model VARCHAR(32) NOT NULL, "
+                "on_hand_qty INT NOT NULL, reserved_qty INT NOT NULL)"))
+            conn.execute(text(
+                "INSERT INTO mfg_atp_demo VALUES (:m, :o, :r)"),
+                [{"m": "A型号", "o": 10, "r": 3},
+                 {"m": "B型号", "o": 5, "r": 1}])
+
+        source = MySQLDataSource(MYSQL_URL, queries={
+            "atp": ("SELECT product_model, on_hand_qty - reserved_qty AS available "
+                    "FROM mfg_atp_demo WHERE product_model = :model"),
+            "kw": ("SELECT product_model FROM mfg_atp_demo "
+                   "WHERE product_model LIKE '%' || :kw || '%'"),
+        })
+        try:
+            assert "mfg_atp_demo" in source.list_tables()
+            assert source.health()["ok"] is True
+            assert source.run_query("atp", {"model": "A型号"}) == [
+                {"product_model": "A型号", "available": 7}]
+            assert len(source.run_query("kw", {"kw": "型号"})) == 2
+            assert source.execute_readonly_sql(
+                "SELECT COUNT(*) AS c FROM mfg_atp_demo")[0]["c"] == 2
+
+            description = source.describe()
+            fields = next(t["fields"] for t in description["tables"]
+                          if t["name"] == "mfg_atp_demo")
+            assert any(f["name"] == "on_hand_qty" for f in fields)
+
+            with pytest.raises(ValueError):
+                source.execute_readonly_sql(
+                    "UPDATE mfg_atp_demo SET on_hand_qty = 0")
+        finally:
+            source.close()
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS mfg_atp_demo"))
+        engine.dispose()
+
+
+def test_mysql_spc_write_channel():
+    """SPC 受治理写入通道：DB_URL=MySQL 时落 SQLAlchemy 仓储。"""
+    from sqlalchemy import create_engine
+
+    from mfg_agents.v2.services import spc_store
+
+    rows = [
+        {"characteristic": "MySQL特性", "subgroup_no": 1, "seq": 1,
+         "value": 10.0, "usl": 12.0, "lsl": 8.0, "source": "mysql-it"},
+        {"characteristic": "MySQL特性", "subgroup_no": 1, "seq": 2,
+         "value": 10.5, "usl": 12.0, "lsl": 8.0, "source": "mysql-it"},
+    ]
+    try:
+        assert spc_store.append_measurements(
+            MYSQL_URL, rows, ingested_by="qa") == 2
+        assert spc_store.count_measurements(MYSQL_URL, "MySQL特性") == 2
+    finally:
+        engine = create_engine(MYSQL_URL)
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS spc_measurement"))
+        engine.dispose()
+
+
+def test_mysql_a2a_task_repository():
+    """A2A 任务结果持久化：MySQL 方言 upsert + TTL 清理。"""
+    from mfg_agents.v2.services.a2a_task_store import (
+        SQLAlchemyA2ATaskRepository,
+    )
+
+    repo = SQLAlchemyA2ATaskRepository(MYSQL_URL)
+    now = time.time()
+    task_id = "a2a-mysql-it"
+    try:
+        repo.save({"id": task_id, "contextId": "run-mysql",
+                   "status": {"state": "completed"},
+                   "artifacts": [{"artifactId": "art-1"}], "ts": now})
+        got = repo.get(task_id)
+        assert got["id"] == task_id and got["contextId"] == "run-mysql"
+        assert got["artifacts"][0]["artifactId"] == "art-1"
+
+        assert repo.purge(3600, now=now + 7200) >= 1
+        assert repo.get(task_id) is None
+    finally:
+        with repo.engine.begin() as conn:
+            conn.execute(text("DELETE FROM a2a_task WHERE task_id = :tid"),
+                         {"tid": task_id})
+        repo.engine.dispose()
+
+
+def test_mysql_workflow_db_health_probe(monkeypatch):
+    """治理库 MySQL：健康探针必须报 ok（平台表可读），而不是旧版“非 SQLite 即 down”。"""
+    from mfg_agents.common.config import settings
+    from mfg_agents.common.platform_schema import ensure_platform_schema
+    from mfg_agents.v2.services import health as health_mod
+
+    ensure_platform_schema(MYSQL_URL)
+    monkeypatch.setattr(settings, "WORKFLOW_DB", MYSQL_URL)
+    state, detail = health_mod._probe_workflow_db()
+    assert state == "ok", detail
+    assert "MySQL" in detail or "mysql" in detail
+    assert "platform_workflow_task" in detail

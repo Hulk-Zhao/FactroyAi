@@ -1,0 +1,136 @@
+# 案例域 ABAC 策略（声明式）——与 v2/data/permissions.yaml 同范式，但**独立注册表**。
+#
+# 为什么独立而不并入 permissions.yaml：见 docs/case-assistant-demo-readme.md 的"偏差"一节。
+# 一句话：permissions.yaml 是 HITL 会签目录（24 权限 × 32 角色 × 8 槽位），改成 ABAC
+# 策略容器会同时污染既有 625 条测试与治理链路；案例域权限有独立的生命周期与审批人。
+#
+# 判定语义（架构 §4.3）：显式 deny > 全局硬门禁 > 维度 AND > RBAC > 默认拒绝。
+version: 1
+
+# ---------- 六个检索动词（+ ingest）的可见状态白名单 ----------
+# BR-06：未结案（draft/review/rejected）与已撤权（withdrawn）永不进检索索引。
+actions:
+  query:
+    label: 检索命中
+    visible_status: [active, deprecated, superseded, archived]
+    enabled: true
+  preview:
+    label: 预览摘要
+    visible_status: [active, deprecated, superseded, archived]
+    enabled: true
+  read:
+    label: 读全文（知识层）
+    visible_status: [active, deprecated, superseded, archived]
+    enabled: true
+  cite:
+    label: 引用到工单
+    visible_status: [active, deprecated]
+    enabled: true
+  export:
+    label: 导出为文件
+    visible_status: []
+    enabled: false
+    deny_reason: 导出默认拒绝：可看≠可带走，必须走导出申请与审批（PRD §7.5）
+  share:
+    label: 外发分享
+    visible_status: []
+    enabled: false
+    deny_reason: 外发分享恒定拒绝，无申请通道（PRD N6）
+  ingest:
+    label: 案例入库
+    visible_status: []
+    enabled: false
+    deny_reason: 入库不是检索动作，编译期短路为永假
+
+# ---------- 默认授权规则（"全员共享"的精确位置，裁定 A6 / ADR-005） ----------
+# 关键：这条 allow **只豁免 role / dept 两维**，其余 9 个维度（tenant / cls / status /
+# plant / line / project / customer / supplier / product_family）照常独立否决。
+# 它不是"该案例所有维度放行"，更不是"跳过权限判定"。
+allow_rules:
+  - id: quality-knowledge-default-open
+    when:
+      resource.category: [quality_case, cross_dept_case]
+      resource.layer: [knowledge]
+      action: [query, preview, read, cite]
+      subject.employment_type: [employee]
+    effect: allow
+    dimensions_exempt: [role, dept]
+    reason: 质量案例知识层在「角色 × 部门」两维默认全员开放，其余维度照常判定
+
+# ---------- 资源级显式 deny（一票否决，不可被任何 allow 覆盖） ----------
+# 编译器看不到资源（签名里没有资源位），因此本组规则由 AclEvaluator 的
+# **二次授权独立代码路径**执行；编译器侧对同一语义用"硬维度"表达
+# （status IN visible_status / cls_rank <= max / is_knowledge_layer == true）。
+deny_rules:
+  - id: deny-secret-classification
+    when: {resource.cls_rank: [3]}
+    reason: 密级=secret 的案例不入共享池（E1 / PRD §7.4）
+  - id: deny-unclosed-status
+    when: {resource.status: [draft, review, rejected]}
+    reason: 未结案案例不进全员共享索引（BR-06 / E4）
+  - id: deny-withdrawn-status
+    when: {resource.status: [withdrawn]}
+    reason: 已撤权案例索引失效，仅审计可查（BR-04）
+  - id: deny-evidence-layer
+    when: {resource.layer: [evidence]}
+    reason: 证据层内容禁止进入检索侧（BR-08 / ADR-003）
+  - id: deny-export-action
+    when: {action: [export]}
+    reason: 导出默认拒绝，需 `case.export` + 申请审批（PRD §7.5）
+  - id: deny-share-action
+    when: {action: [share]}
+    reason: 外发分享恒定拒绝（PRD N6）
+
+# ---------- 主体级显式 deny（编译期阶段 1，短路为 FALSE_FILTER） ----------
+subject_deny_rules:
+  - id: deny-anonymous-principal
+    when: {subject.user_id: ["", "-", "anonymous", "null", "none"]}
+    reason: 无身份主体一律拒绝（default-deny / PR-1）
+  - id: deny-missing-tenant
+    when: {subject.tenant: [""]}
+    reason: 缺失租户维度按最严格解释拒绝（架构 §4.6）
+  - id: deny-unknown-employment-type
+    when: {subject.employment_type: ["", "unknown", "vendor", "guest", "partner"]}
+    reason: 未识别的用工类型一律拒绝（fail-closed）
+
+# ---------- 运行时参数 ----------
+settings:
+  # 跨职能域通行角色（2026-10-19 产品裁定：总经理应全部门可见）。
+  # 只豁免「令牌交集」这一步（role/dept/plant 等业务维 ACL 行不再要求匹配），
+  # **硬门禁一概照常**：密级上限、状态白名单、证据层、租户、显式 deny——
+  # 豁免是"业务范围"的放宽，不是越权通行证。编译器（cross-dept 路径）与
+  # AclEvaluator（二次授权）两处独立实现必须保持同一语义（各 有 用 例 钉）。
+  cross_dept_roles: [gm]
+  # 只有正式员工享受"质量案例全员共享"默认值（PRD §15 P5 建议默认）。
+  # 非正式员工（外包/临时/供应商/客户账号）只走 vc=0 快路径：拿不到任何
+  # 带 dept/plant 约束的案例（含岗位经验案例），这是本 demo 的确定性差异点。
+  fast_path_employment_types: [employee]
+  max_principal_tokens: 64
+  expose_hidden_count: true
+  hidden_count_only_when_short: true
+  # 拒答闸门（标定值见 tools/calibrate_answer_thresholds.py）
+  #  ⚠️ 这两个值与**检索后端的分数分布强绑定**：
+  #     demo 后端是 blake2b 1-2gram 字符重合度，分数分布随语料规模漂移；
+  #     换成真实 embedding（BGE-M3 等）后**必须重跑标定脚本**，否则闸门形同虚设。
+  low_confidence_threshold: 0.18
+  # 绝对下限：top1 低于它 → 拒答（99 例语料下无关问句的 p95 ≈ 0.173，最高 0.192）
+  answer_min_score: 0.20
+  # 相对余量：top1 - 中位分 低于它 → 拒答（防"全库都不相关但分数均匀平庸"）
+  answer_margin: 0.05
+  # **术语闸门**：问题里一个受控词条都没命中时，要求更高的分数才允许作答。
+  # 为什么需要第三条：实测两组分数分布**重叠**（无关组最高 0.192 vs 相关组最低 0.155），
+  # 单靠绝对/相对阈值分不开——"食堂几点开饭"比"螺钉滑牙"分数还高。
+  # "有没有制造术语"才是真正的判别信号；这一条只对"零术语"问题抬高门槛，
+  # 不影响命中术语的真问题。标定值 0.27 与无关组最高分 0.192 之间留了 0.078 的间隔。
+  answer_score_without_terms: 0.27
+  max_chunks_per_case: 2
+  rerank_candidates: 12
+  # 排序权重（PRD §6.3 状态权重 × 新鲜度 × 有效性验证）
+  status_weight:
+    active: 1.0
+    deprecated: 0.4
+    superseded: 0.3
+    archived: 0.2
+  freshness_days: 730
+  stale_factor: 0.85
+  unverified_factor: 0.9

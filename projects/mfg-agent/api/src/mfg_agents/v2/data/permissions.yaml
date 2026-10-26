@@ -1,0 +1,454 @@
+# 治理层权限目录（声明式）：Permission 独立实体 + Role = Permission 命名集合
+#
+# 设计范式对标 Huly Platform 的 controlled-documents 模块：
+#   permissions.ts  → 本文件 permissions:
+#   roles.ts        → 本文件 roles:（Role 是 permission key 的命名集合）
+#   spaceType.ts    → 本文件的 slots:（显式声明每个 HITL 节点支持哪三个权限）
+#
+# 命名规范：hitl.<slot>.<verb>，verb ∈ propose | cosign | approve
+#   propose  发起该处置动作（提出决策）
+#   cosign   会签（多角色共同背书，缺一不可）
+#   approve  终批（会签齐备后放行）
+#
+# 铁律：业务代码**不得**硬编码角色名或权限判断，一律经 PermissionRegistry 查询；
+#       未识别的角色/权限一律 fail-closed（拒绝，不放行）。
+#
+# 架构铁律（Agent 不得自动放行）：
+#   每个 role 必须声明 actor_kind: human | agent。
+#   **Agent 身份角色只允许 *.propose，不得持有任何 *.approve**——
+#   PermissionRegistry 构造期自检，违反即启动失败。
+#   若新增 Agent 身份角色却漏标 actor_kind，必须同步 contracts/permissions.py 的
+#   AGENT_ACTOR_ROLES 显式黑名单，否则自检不会拦住「Agent 持 approve」的破防配置。
+version: 2
+
+# ---------- 10 个 HITL 槽位（7 场景 + S1 接单评审 + 报告中心审定） ----------
+# available_permissions 必须显式声明（加载期校验：必须存在且归属本槽位）；
+# 场景 YAML 里出现这 10 个之外的 hitl kind，ScenarioRegistry 加载期即报错。
+# 2026-10-22 勘误：原注释写「9 个」（T16 报告中心 report_publish 落槽后未同步）。
+slots:
+  - key: restart
+    name: 复线决策
+    scene: line_stop_v2
+    available_permissions: [hitl.restart.propose, hitl.restart.cosign, hitl.restart.approve]
+  - key: eta
+    name: 对客 ETA 承诺
+    scene: line_stop_v2
+    available_permissions: [hitl.eta.propose, hitl.eta.cosign, hitl.eta.approve]
+  - key: disposition
+    name: 来料处置
+    scene: incoming_quality_v2
+    available_permissions: [hitl.disposition.propose, hitl.disposition.cosign, hitl.disposition.approve]
+  - key: d8_close
+    name: 8D 报告关闭
+    scene: customer_complaint_v2
+    available_permissions: [hitl.d8_close.propose, hitl.d8_close.cosign, hitl.d8_close.approve]
+  - key: complaint_reply
+    name: 对客回复
+    scene: customer_complaint_v2
+    available_permissions: [hitl.complaint_reply.propose, hitl.complaint_reply.cosign, hitl.complaint_reply.approve]
+  - key: delivery_commit
+    name: 交期承诺
+    scene: delivery_status_v2
+    available_permissions: [hitl.delivery_commit.propose, hitl.delivery_commit.cosign, hitl.delivery_commit.approve]
+  - key: maintenance_window
+    name: 停机窗口
+    scene: equipment_warning_v2
+    available_permissions: [hitl.maintenance_window.propose, hitl.maintenance_window.cosign, hitl.maintenance_window.approve]
+  - key: spc_action
+    name: 过程异常处置
+    scene: spc_anomaly_v2
+    available_permissions: [hitl.spc_action.propose, hitl.spc_action.cosign, hitl.spc_action.approve]
+  # T15：S1 接单评审会签（propose=业务 / cosign=工程+计划 / approve=业务经理）
+  - key: order_review
+    name: 接单评审会签
+    scene: order_review_v2
+    available_permissions: [hitl.order_review.propose, hitl.order_review.cosign, hitl.order_review.approve]
+  # 报告中心：报告审定与派发（propose=编制/发起审定 / cosign=对客口径与数据复核 / approve=最终放行）
+  - key: report_publish
+    name: 报告审定与派发
+    scene: report_center
+    available_permissions: [hitl.report_publish.propose, hitl.report_publish.cosign, hitl.report_publish.approve]
+
+# ---------- 权限目录（30 条 = 10 slot × 3 verb） ----------
+permissions:
+  # 复线决策
+  - {key: hitl.restart.propose,            name: 发起复线决策,     scope: hitl, description: "提出按建议/暂缓/分批试产复线的处置动作"}
+  - {key: hitl.restart.cosign,             name: 复线决策会签,     scope: hitl, description: "对复线决策做质量/设备侧会签背书"}
+  - {key: hitl.restart.approve,            name: 复线决策终批,     scope: hitl, description: "复线决策最终放行（现场负责人 / 质量总监）"}
+  # 对客 ETA 承诺
+  - {key: hitl.eta.propose,                name: 发起对客 ETA,     scope: hitl, description: "提出对客交期承诺口径"}
+  - {key: hitl.eta.cosign,                 name: 对客 ETA 会签,    scope: hitl, description: "对可承诺产能/排产可行性会签"}
+  - {key: hitl.eta.approve,                name: 对客 ETA 终批,    scope: hitl, description: "对客承诺口径最终放行"}
+  # 来料处置
+  - {key: hitl.disposition.propose,        name: 发起来料处置,     scope: hitl, description: "提出退货/换货/特采/挑选/降级/报废处置动作"}
+  - {key: hitl.disposition.cosign,         name: 来料处置会签,     scope: hitl, description: "对来料处置做工艺/业务/品质/采购/成本会签"}
+  - {key: hitl.disposition.approve,        name: 来料处置终批,     scope: hitl, description: "来料处置最终放行（质量总监 / QA经理 / 总经理）"}
+  # 8D 关闭
+  - {key: hitl.d8_close.propose,           name: 发起 8D 关闭,     scope: hitl, description: "提出关闭/退回补充/延期关闭"}
+  - {key: hitl.d8_close.cosign,            name: 8D 关闭会签,      scope: hitl, description: "对措施有效性做工程/供应商质量会签"}
+  - {key: hitl.d8_close.approve,           name: 8D 关闭终批,      scope: hitl, description: "8D 结案最终放行"}
+  # 对客回复
+  - {key: hitl.complaint_reply.propose,    name: 发起对客回复,     scope: hitl, description: "提出对客回复口径（8D/加严承诺/升级）"}
+  - {key: hitl.complaint_reply.cosign,     name: 对客回复会签,     scope: hitl, description: "对回复口径与 8D 结论一致性会签"}
+  - {key: hitl.complaint_reply.approve,    name: 对客回复终批,     scope: hitl, description: "对客话术最终放行"}
+  # 交期承诺
+  - {key: hitl.delivery_commit.propose,    name: 发起交期承诺,     scope: hitl, description: "提出按 ATP/分批出货/加急/升级"}
+  - {key: hitl.delivery_commit.cosign,     name: 交期承诺会签,     scope: hitl, description: "对排产/仓储/制造可行性会签"}
+  - {key: hitl.delivery_commit.approve,    name: 交期承诺终批,     scope: hitl, description: "对客交期最终放行"}
+  # 停机窗口
+  - {key: hitl.maintenance_window.propose, name: 发起停机窗口,     scope: hitl, description: "提出立即停机/计划窗口/降速运行"}
+  - {key: hitl.maintenance_window.cosign,  name: 停机窗口会签,     scope: hitl, description: "对排产/工艺/设备可行性会签"}
+  - {key: hitl.maintenance_window.approve, name: 停机窗口终批,     scope: hitl, description: "停机窗口最终放行"}
+  # 过程异常处置（SPC 越限/过程能力不足）
+  - {key: hitl.spc_action.propose,         name: 发起过程处置,     scope: hitl, description: "提出加严检验/工程介入/计划内暂停/维持监控处置动作"}
+  - {key: hitl.spc_action.cosign,          name: 过程处置会签,     scope: hitl, description: "对过程处置做工艺/PQE 侧会签背书"}
+  - {key: hitl.spc_action.approve,         name: 过程处置终批,     scope: hitl, description: "过程异常处置最终放行（质量总监 / 制造现场负责人）"}
+  # 接单评审会签（T15 / S1）
+  - {key: hitl.order_review.propose,       name: 发起接单评审,     scope: hitl, description: "接单评审提出处置动作（接受 / 有条件接受 / 退回重议）"}
+  - {key: hitl.order_review.cosign,        name: 接单评审会签,     scope: hitl, description: "对工艺可行性与排产产能做会签背书（工程 / 计划）"}
+  - {key: hitl.order_review.approve,       name: 接单评审终批,     scope: hitl, description: "接单评审最终放行（业务经理）"}
+  # 报告审定与派发（报告中心）
+  - {key: hitl.report_publish.propose,     name: 发起报告审定,     scope: hitl, description: "发起报告审定/驳回（报告编制与责任岗位）"}
+  - {key: hitl.report_publish.cosign,      name: 报告审定会签,     scope: hitl, description: "对报告结论与对客口径一致性会签（质量 / 业务 / 客服）"}
+  - {key: hitl.report_publish.approve,     name: 报告审定终批,     scope: hitl, description: "报告审定与对外派发最终放行（总经理 / 质量总监）"}
+
+# ---------- 角色（Role = 命名权限集合） ----------
+# key 为英文稳定标识；aliases 覆盖场景 YAML / 演示前端 / 用户上下文里的各种写法。
+# 注意：demo 前端 user_ctx.roles 使用平台域角色（quality / business / supply_chain …），
+#      也在此通过 aliases 归一化，保证"前端传什么写法都能落到确定角色"。
+roles:
+  - key: gm
+    name: 总经理
+    dept: management
+    actor_kind: human
+    aliases: [总经理, 总裁, 副总, GM, coordinator, management]
+    permissions:
+      - hitl.restart.approve
+      - hitl.eta.approve
+      - hitl.disposition.approve
+      - hitl.d8_close.approve
+      - hitl.complaint_reply.approve
+      - hitl.delivery_commit.approve
+      - hitl.maintenance_window.approve
+      - hitl.report_publish.approve
+
+  - key: quality_director
+    name: 质量总监
+    dept: quality
+    actor_kind: human
+    aliases: [质量总监, 品质总监, QD]
+    permissions:
+      - hitl.restart.approve
+      - hitl.disposition.approve
+      - hitl.d8_close.propose
+      - hitl.d8_close.approve
+      - hitl.maintenance_window.approve
+      - hitl.spc_action.cosign
+      - hitl.spc_action.approve
+      - hitl.report_publish.propose
+      - hitl.report_publish.cosign
+      - hitl.report_publish.approve
+
+  - key: qa_manager
+    name: QA经理
+    dept: quality
+    actor_kind: human
+    aliases: [QA经理, QA主管, 品质经理]
+    permissions:
+      - hitl.disposition.approve
+      - hitl.d8_close.propose
+      - hitl.d8_close.approve
+      - hitl.report_publish.propose
+
+  - key: qa
+    name: QA
+    dept: quality
+    actor_kind: human
+    aliases: [QA, 质量保证, 质量管理]
+    permissions:
+      - hitl.disposition.propose
+      - hitl.disposition.cosign
+      - hitl.complaint_reply.cosign
+
+  - key: sqe
+    name: SQE
+    dept: quality
+    actor_kind: human
+    aliases: [SQE, 供应商质量工程师, 来料质量工程师, quality]
+    permissions:
+      - hitl.disposition.propose
+      - hitl.d8_close.cosign
+
+  - key: pqe
+    name: PQE
+    dept: quality
+    actor_kind: human
+    aliases: [PQE, 制程质量工程师, 过程质量工程师]
+    permissions:
+      - hitl.disposition.propose
+      - hitl.disposition.cosign
+      - hitl.restart.cosign
+      - hitl.d8_close.cosign
+      - hitl.maintenance_window.cosign
+      - hitl.spc_action.propose
+      - hitl.spc_action.cosign
+
+  - key: procurement
+    name: 采购
+    dept: procurement
+    actor_kind: human
+    aliases: [采购, 采购专员, procurement, purchasing]
+    permissions:
+      - hitl.disposition.cosign
+
+  - key: planning
+    name: 计划
+    dept: supply_chain
+    actor_kind: human
+    aliases: [计划, 计划员, 计划经理, planning, PMC, PLN]
+    permissions:
+      - hitl.eta.cosign
+      - hitl.delivery_commit.cosign
+      - hitl.maintenance_window.cosign
+      - hitl.order_review.cosign
+
+  - key: material_control
+    name: 物控
+    dept: supply_chain
+    actor_kind: human
+    aliases: [物控, 物控专员, 物料控制, material_control, supply_chain]
+    permissions:
+      - hitl.delivery_commit.cosign
+
+  - key: manufacturing
+    name: 制造
+    dept: manufacturing
+    actor_kind: human
+    aliases: [制造, 制造现场负责人, 生产, 生产主管, 制造经理, manufacturing, 车间主任]
+    permissions:
+      - hitl.restart.propose
+      - hitl.restart.approve
+      - hitl.disposition.cosign
+      - hitl.delivery_commit.cosign
+      - hitl.maintenance_window.propose
+      - hitl.maintenance_window.approve
+      - hitl.spc_action.propose
+      - hitl.spc_action.cosign
+      - hitl.spc_action.approve
+      - hitl.report_publish.propose
+
+  - key: equipment
+    name: 设备工程
+    dept: equipment
+    actor_kind: human
+    aliases: [设备工程, 设备工程师, 设备, equipment, 维保, EQ]
+    permissions:
+      - hitl.restart.cosign
+      - hitl.maintenance_window.cosign
+
+  - key: sales
+    name: 业务
+    dept: sales
+    actor_kind: human
+    aliases: [业务, 业务经理, 业务员, 销售, 销售总监, 销售经理, sales, business]
+    permissions:
+      - hitl.eta.propose
+      - hitl.eta.approve
+      - hitl.disposition.cosign
+      - hitl.complaint_reply.propose
+      - hitl.complaint_reply.approve
+      - hitl.delivery_commit.propose
+      - hitl.delivery_commit.approve
+      - hitl.order_review.propose
+      - hitl.order_review.approve
+      - hitl.report_publish.propose
+      - hitl.report_publish.cosign
+
+  - key: warehouse
+    name: 仓库
+    dept: warehouse
+    actor_kind: human
+    aliases: [仓库, 仓库主管, 仓储, 物流, warehouse, logistics]
+    permissions:
+      - hitl.delivery_commit.cosign
+
+  - key: rd_engineering
+    name: 工程
+    dept: rd_engineering
+    actor_kind: human
+    aliases: [工程, 工程师, 研发, 研发工程师, 工艺, 工艺工程师, rd_engineering, engineering]
+    permissions:
+      - hitl.d8_close.cosign
+      - hitl.maintenance_window.cosign
+      - hitl.spc_action.propose
+      - hitl.spc_action.cosign
+      - hitl.order_review.cosign
+
+  - key: product_engineering
+    name: 产品/工艺工程
+    dept: rd_engineering
+    actor_kind: human
+    aliases: [产品工程, 工艺工程, 制程工程, PE, product_engineering, process_engineer]
+    permissions:
+      - hitl.d8_close.cosign
+      - hitl.restart.cosign
+
+  - key: finance
+    name: 财务
+    dept: finance
+    actor_kind: human
+    aliases: [财务, 成本会计, finance, cost, FIN]
+    permissions:
+      - hitl.disposition.cosign
+
+  # ---------- 部门负责人（每个职能部门一个经理/总监岗位，对接演示门户登录） ----------
+  # 说明：制造→manufacturing（制造经理）、业务→sales（业务经理）、质量→quality_director
+  #      （质量总监）已在一线角色中覆盖，此处补齐其余职能部门负责人。
+  # 权限只引用既有 24 条，不新增 permission；actor_kind 一律 human。
+  - key: equipment_manager
+    name: 设备经理
+    dept: equipment
+    actor_kind: human
+    aliases: [设备经理, 设备总监, 设备主管, equipment_manager]
+    permissions:
+      - hitl.restart.cosign
+      - hitl.maintenance_window.cosign
+      - hitl.maintenance_window.approve
+
+  - key: rd_manager
+    name: 研发经理
+    dept: rd_engineering
+    actor_kind: human
+    aliases: [研发经理, 研发总监, 工程经理, rd_manager]
+    permissions:
+      - hitl.d8_close.cosign
+      - hitl.restart.cosign
+      - hitl.maintenance_window.cosign
+
+  - key: supply_chain_manager
+    name: 供应链经理
+    dept: supply_chain
+    actor_kind: human
+    aliases: [供应链经理, 供应链总监, 计划总监, SCM, supply_chain_manager]
+    permissions:
+      - hitl.eta.cosign
+      - hitl.delivery_commit.cosign
+      - hitl.delivery_commit.approve
+      - hitl.maintenance_window.cosign
+
+  - key: procurement_manager
+    name: 采购经理
+    dept: procurement
+    actor_kind: human
+    aliases: [采购总监, 采购主管, 采购管理, procurement_manager]
+    permissions:
+      - hitl.disposition.propose
+      - hitl.disposition.cosign
+
+  - key: warehouse_manager
+    name: 仓储经理
+    dept: warehouse
+    actor_kind: human
+    aliases: [仓储经理, 仓库经理, 物流经理, 仓储总监, warehouse_manager]
+    permissions:
+      - hitl.delivery_commit.cosign
+      - hitl.delivery_commit.approve
+
+  - key: finance_manager
+    name: 财务经理
+    dept: finance
+    actor_kind: human
+    aliases: [财务总监, 财务主管, 成本经理, finance_manager]
+    permissions:
+      - hitl.disposition.cosign
+
+  # ---------- 工程 / 项目 / 职能岗位（P0：补齐"有智能体无门户岗位"的门面缺口） ----------
+  # 说明：IE / NPI / PM / 工程测试 TE / 结构工程 ME / 研发测试 / 行政人事 七个智能体
+  #      早已在 agents/agentic.py 注册，但门户缺对应登录岗位与治理角色，导致
+  #      "智能体在、人不在"。本段补齐，使「一人一岗一治理角色」对全部智能体成立。
+  # 权限只引用既有 24 条；工程侧以会签（cosign）背书为主，一律不授终批（approve）。
+  - key: ie_engineer
+    name: IE 工业工程
+    dept: rd_engineering
+    actor_kind: human
+    aliases: [IE, IE工程师, 工业工程, 工业工程师, ie_engineer]
+    permissions:
+      - hitl.restart.cosign
+
+  - key: npi_engineer
+    name: NPI 导入工程师
+    dept: rd_engineering
+    actor_kind: human
+    aliases: [NPI, NPI工程师, 导入工程师, 新产品导入, npi_engineer]
+    permissions:
+      - hitl.restart.cosign
+      - hitl.d8_close.cosign
+
+  - key: project_manager
+    name: 项目经理
+    dept: pm
+    actor_kind: human
+    aliases: [PM, 项目经理, 项目总监, 项目负责人, project_manager]
+    permissions:
+      - hitl.restart.cosign
+      - hitl.delivery_commit.cosign
+      - hitl.maintenance_window.cosign
+      - hitl.report_publish.propose
+
+  - key: test_engineer
+    name: 工程测试工程师
+    dept: rd_engineering
+    actor_kind: human
+    aliases: [TE, 测试工程师, 工程测试, 可靠性工程师, test_engineer]
+    permissions:
+      - hitl.d8_close.cosign
+
+  - key: me_engineer
+    name: 结构工程师
+    dept: rd_engineering
+    actor_kind: human
+    aliases: [ME, 结构工程师, 结构工程, 机构工程师, me_engineer]
+    permissions:
+      - hitl.restart.cosign
+      - hitl.d8_close.cosign
+
+  - key: rd_test_engineer
+    name: 研发测试工程师
+    dept: rd_engineering
+    actor_kind: human
+    aliases: [研发测试, 软件测试, 测试开发, 固件测试, rd_test_engineer]
+    permissions:
+      - hitl.d8_close.cosign
+
+  - key: admin_hr
+    name: 行政人事
+    dept: admin
+    actor_kind: human
+    aliases: [HR, 人事, 行政, 行政人事, 人事专员, admin_hr]
+    permissions: []
+
+  # ---------- 安全环保 / 客户服务 / 设备维保（P1：补齐部门岗位与治理角色） ----------
+  - key: ehs
+    name: EHS 安全环保
+    dept: ehs
+    actor_kind: human
+    aliases: [EHS, 安全环保, 安全工程师, 环保工程师, 安全员, ehs]
+    permissions:
+      - hitl.maintenance_window.cosign
+
+  - key: customer_service
+    name: 客户服务
+    dept: service
+    actor_kind: human
+    aliases: [客服, 客户服务, 售后, 售后服务, 客服专员, customer_service]
+    permissions:
+      - hitl.complaint_reply.cosign
+      - hitl.report_publish.cosign
+
+  - key: maintenance_tech
+    name: 设备维保技师
+    dept: equipment
+    actor_kind: human
+    aliases: [维保技师, 设备维保, 维修技师, 维修工, 机修, maintenance_tech]
+    permissions:
+      - hitl.maintenance_window.propose

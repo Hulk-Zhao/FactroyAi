@@ -1,0 +1,219 @@
+# 看板数据范围目录（声明式）——四个 /api/v2/dashboard/* 端点的裁决依据
+#
+# 为什么需要这份文件：
+#   四个看板端点此前「全员可见」（docstring 里也这么写），任何岗位只要持有
+#   有效令牌就能拉取 SPC 过程能力、订单履约、成本相关聚合。菜单层收敛只能
+#   隐藏入口，挡不住直接调接口——「HR 凭什么看 SPC」这个问题必须有服务端口径。
+#
+# 铁律：
+#   1. **未声明的看板 = 拒绝**（fail-closed）。新增看板必须在本文件登记，
+#      否则连总经都拿不到数据；`tests/v2/test_架构守卫.py` 会扫 api.py 兜这条。
+#   2. 角色一律用 permissions.yaml 的 32 个 key，禁止另立命名。
+#      加载期会逐个校验，出现未识别角色即启动失败（与 PermissionRegistry 同款纪律）。
+#   3. 脱敏是**服务端**行为：前端只负责展示，不得据此判断权限。
+#   4. 脱敏必须成对处理「显示名 + 下钻键」：只藏名字、留下钻用的客户键，
+#      点一下就还原了真名，等于没脱敏（见 orders 的 also_drop）。
+#
+# 与前端 NAV_ITEMS[].roles 的关系：
+#   NAV 是**展示归属**（哪些岗位该在菜单里看到这一屏），本文件是**接口裁决**。
+#   两者必须一致——不一致会表现为「菜单有、点进去 403」或「菜单没、接口能拿」。
+#   `tests/v2/test_数据范围.py` 交叉校验两边的角色集合。
+version: 1
+
+# 稳定脱敏口径（按出现值的字典序分配编号，同一批数据多次请求结果一致）
+pseudo:
+  customers: 客户
+
+dashboards:
+  # ---------- 制造综合看板（制造 + 品质双 tab，同一屏两个端点）----------
+  # 两个 tab 属于同一屏，角色集合必须一致，否则切 tab 就会出现 403。
+  manufacturing:
+    name: 制造综合看板
+    screen: mfgboard
+    allow_roles:
+      - gm
+      - manufacturing
+      - equipment
+      - equipment_manager
+      - maintenance_tech
+      - quality_director
+      - qa_manager
+      - qa
+      - sqe
+      - pqe
+      - product_engineering
+      - ie_engineer
+      - test_engineer
+      - rd_manager
+      - rd_engineering
+      - me_engineer
+      - rd_test_engineer
+      - npi_engineer
+      - project_manager
+      - ehs
+
+  quality:
+    name: 品质看板
+    screen: mfgboard
+    # 与 manufacturing 同屏（tab 切换），角色集合必须相同
+    allow_roles:
+      - gm
+      - manufacturing
+      - equipment
+      - equipment_manager
+      - maintenance_tech
+      - quality_director
+      - qa_manager
+      - qa
+      - sqe
+      - pqe
+      - product_engineering
+      - ie_engineer
+      - test_engineer
+      - rd_manager
+      - rd_engineering
+      - me_engineer
+      - rd_test_engineer
+      - npi_engineer
+      - project_manager
+      - ehs
+
+  # ---------- 订单履约看板 ----------
+  orders:
+    name: 订单履约看板
+    screen: orders
+    allow_roles:
+      - gm
+      - manufacturing
+      - sales
+      - customer_service
+      - project_manager
+      - planning
+      - material_control
+      - supply_chain_manager
+      - procurement_manager
+      - procurement
+      - warehouse_manager
+      - warehouse
+      - finance_manager
+      - finance
+    # 客户身份（客户名 / 客户等级）只在承担对客与收款责任的岗位可见。
+    # 物控、仓库、采购、制造看到的是「客户 A / 客户 B」——够用来排优先级，
+    # 但不足以还原是哪一家客户、更不足以反推合同等级。
+    mask:
+      - path: risk_orders[].customer
+        label: 客户名称
+        keep_roles: [gm, sales, customer_service, project_manager, finance, finance_manager]
+        pseudo: customers
+      - path: risk_orders[].customer_level
+        label: 客户等级
+        keep_roles: [gm, sales, customer_service, project_manager, finance, finance_manager]
+        literal: "—"
+      - path: rankings[key=otd].items[].name
+        label: 客户名称
+        keep_roles: [gm, sales, customer_service, project_manager, finance, finance_manager]
+        pseudo: customers
+        compose_sep: " · "
+        # 排行行同时带着下钻实体 {customer, level}；名字藏了、键还在 = 一钻还原
+        also_drop: [entity]
+      - path: rankings[key=otif].items[].name
+        label: 客户名称
+        keep_roles: [gm, sales, customer_service, project_manager, finance, finance_manager]
+        pseudo: customers
+        compose_sep: " · "
+        also_drop: [entity]
+      - path: rankings[key=delay_rate].items[].name
+        label: 客户名称
+        keep_roles: [gm, sales, customer_service, project_manager, finance, finance_manager]
+        pseudo: customers
+        compose_sep: " · "
+        also_drop: [entity]
+      # 「状态管道 · 点环节」弹窗（/dashboard/orders/stage）：清单行带客户身份，
+      # 与 risk_orders[] 同一套 keep_roles —— 看板里被脱敏的客户，弹窗清单里也看不到。
+      - path: orders[].customer
+        label: 客户名称
+        keep_roles: [gm, sales, customer_service, project_manager, finance, finance_manager]
+        pseudo: customers
+      - path: orders[].customer_level
+        label: 客户等级
+        keep_roles: [gm, sales, customer_service, project_manager, finance, finance_manager]
+        literal: "—"
+      # 「风险订单 · 点行」弹窗（/dashboard/orders/detail）：单订单全字段同理。
+      - path: order.customer
+        label: 客户名称
+        keep_roles: [gm, sales, customer_service, project_manager, finance, finance_manager]
+        pseudo: customers
+      - path: order.customer_level
+        label: 客户等级
+        keep_roles: [gm, sales, customer_service, project_manager, finance, finance_manager]
+        literal: "—"
+
+  # ---------- 现场看板（客诉 → 责任工段推送队列 / 现场 ack 与闭环回写）----------
+  # 岗位口径**刻意与制造/品质看板同源**：现场看板是这两屏的"现场落点"，同一批受众
+  # （制造/品质/工程/计划…）。另立一份角色集合会让"看板能看、现场看板 403"成为常态，
+  # 而这份目录的铁律是角色一律取自 permissions.yaml 的 32 个 key——不新造命名。
+  # 客户身份与订单看板同一口径：只有承担对客责任的岗位能看到客户名，
+  # 其余岗位看到「客户 A / 客户 B」。正文里也不内联客户名（脱敏规则改不动自由文本）。
+  site_board:
+    name: 现场看板
+    screen: mfgboard
+    allow_roles:
+      - gm
+      - manufacturing
+      - equipment
+      - equipment_manager
+      - maintenance_tech
+      - quality_director
+      - qa_manager
+      - qa
+      - sqe
+      - pqe
+      - product_engineering
+      - ie_engineer
+      - test_engineer
+      - rd_manager
+      - rd_engineering
+      - me_engineer
+      - rd_test_engineer
+      - npi_engineer
+      - project_manager
+      - ehs
+    mask:
+      - path: rows[].customer
+        label: 客户名称
+        keep_roles: [gm, sales, customer_service, project_manager, finance, finance_manager]
+        pseudo: customers
+
+  # ---------- SPC 过程能力看板 ----------
+  spc:
+    name: SPC 过程能力看板
+    screen: spc
+    allow_roles:
+      - gm
+      - manufacturing
+      - quality_director
+      - pqe
+      - sqe
+      - qa
+      - product_engineering
+      - test_engineer
+      - ie_engineer
+
+# ---------- 行级组织范围（令牌 claim → 服务端 WHERE 下推）----------
+# 角色维度只回答「哪个岗位能看看板」；同一岗位内的产线负责人仍会看到全厂。
+# 本段把「看到哪几条产线」收敛到令牌携带的归属声明（claim，默认 line_ids）：
+#   1. **缺省不收紧**：claim 缺省 / 为空 → 行为与改动前逐字段一致（演示与存量令牌）；
+#   2. **只能由签发方写入**：claim 由登录（演示会话）或生产 SSO 写进签名令牌，
+#      客户端无法在请求参数里自报范围；
+#   3. **能力边界如实标注**：带产线列的表（equipment_run_time / scrap_record /
+#      work_report / quality_defect）精确到产线；只有工段列的表（spc_measurement /
+#      std_standard_audit）按产线前缀收紧到工段并标注；两者都没有的指标（测试记录 /
+#      来料 / 客诉）保持全厂口径并标注，绝不假装已收紧；
+#   4. **未登记 = 不收紧**：本段只对列出的看板生效，其余看板（orders）没有产线维度，
+#      新增看板若要行级范围必须在此显式登记。
+row_scope:
+  claim: line_ids
+  dashboards:
+    - manufacturing
+    - quality
+    - spc
