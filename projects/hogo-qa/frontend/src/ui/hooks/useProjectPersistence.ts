@@ -106,8 +106,12 @@ export function useProjectPersistence(): ProjectPersistenceApi {
             return { ...c, measurementBlobRef: null };
           }
           const ref = c.measurementBlobRef ?? makeBlobRef(c.id);
-          await handle.repository.writeMeasurements(ref, measurements);
-          return { ...c, measurementBlobRef: ref };
+          try {
+            await handle.repository.writeMeasurements(ref, measurements);
+            return { ...c, measurementBlobRef: ref };
+          } catch {
+            return { ...c, measurementBlobRef: null };
+          }
         }) ?? [],
       );
 

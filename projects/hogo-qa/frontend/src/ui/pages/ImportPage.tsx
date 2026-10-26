@@ -16,6 +16,9 @@
 
 import { useMemo, useState } from 'react';
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
   Box,
   Button,
@@ -37,6 +40,9 @@ import {
   UploadFile as UploadFileIcon,
   ContentPaste as ContentPasteIcon,
   CheckCircle as CheckCircleIcon,
+  ExpandMore as ExpandMoreIcon,
+  PlayArrow as PlayArrowIcon,
+  Download as DownloadIcon,
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import type { ReactElement } from 'react';
@@ -53,6 +59,12 @@ import { autoMapColumns } from '@/data/importer/xlsxImporter';
 import { buildModel } from '@/data/importer/buildModel';
 import { requiredRoles } from '@/data/importer/columnAliases';
 import type { ColumnMapping, FieldRole, ParsedSheet } from '@/data/importer/types';
+import {
+  SAMPLE_DATASETS,
+  buildSampleDataset,
+  downloadSampleXlsx,
+  type SampleDatasetSpec,
+} from '@/data/samples/sampleDatasets';
 
 /** 页面局部状态：解析后的表 + 映射。 */
 interface ParsedState {
@@ -400,6 +412,31 @@ export default function ImportPage(): ReactElement {
         </CardContent>
       </Card>
 
+      <Accordion variant="outlined" data-testid="sample-section">
+        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <PlayArrowIcon color="primary" fontSize="small" />
+            <Typography variant="subtitle2" fontWeight={600}>
+              样例数据（一键体验）
+            </Typography>
+            <Chip size="small" label={`${SAMPLE_DATASETS.length} 组`} variant="outlined" />
+          </Stack>
+        </AccordionSummary>
+        <AccordionDetails>
+          <Box
+            sx={{
+              display: 'grid',
+              gridTemplateColumns: { xs: '1fr', md: 'repeat(3, 1fr)' },
+              gap: 2,
+            }}
+          >
+            {SAMPLE_DATASETS.map((spec) => (
+              <SampleDataCard key={spec.id} spec={spec} />
+            ))}
+          </Box>
+        </AccordionDetails>
+      </Accordion>
+
       {parsed ? (
         <>
           <Card variant="outlined">
@@ -557,5 +594,72 @@ export default function ImportPage(): ReactElement {
         </Alert>
       )}
     </Stack>
+  );
+}
+
+/** 样例数据卡片（导入页内嵌版）。 */
+function SampleDataCard({ spec }: { spec: SampleDatasetSpec }): ReactElement {
+  const navigate = useNavigate();
+  const setDataset = useProjectStore((s) => s.setDataset);
+  const pushToast = useUiStore((s) => s.pushToast);
+  const { persist } = useProjectPersistence();
+  const [busy, setBusy] = useState(false);
+
+  const handleLoad = async (): Promise<void> => {
+    const dataset = buildSampleDataset(spec);
+    setDataset(dataset);
+    await persist({
+      successMessage: `已载入样例「${spec.title}」并保存到项目库`,
+    });
+    navigate('/capability');
+  };
+
+  const handleDownload = async (): Promise<void> => {
+    setBusy(true);
+    try {
+      await downloadSampleXlsx(spec);
+      pushToast(`已生成 hogo-qa-sample-${spec.id}.xlsx`, 'success');
+    } catch (e) {
+      pushToast(`样例下载失败：${e instanceof Error ? e.message : String(e)}`, 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card variant="outlined" sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 1 }}>
+      <Typography variant="subtitle2" fontWeight={700}>
+        {spec.title}
+      </Typography>
+      <Typography variant="caption" color="text.secondary">
+        {spec.scene}
+      </Typography>
+      <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+        {spec.tags.map((t) => (
+          <Chip key={t} size="small" label={t} variant="outlined" />
+        ))}
+      </Stack>
+      <Stack direction="row" spacing={1} sx={{ mt: 'auto' }}>
+        <Button
+          size="small"
+          variant="contained"
+          startIcon={<PlayArrowIcon />}
+          onClick={() => void handleLoad()}
+          data-testid={`import-sample-load-${spec.id}`}
+        >
+          载入并分析
+        </Button>
+        <Button
+          size="small"
+          variant="outlined"
+          startIcon={<DownloadIcon />}
+          onClick={() => void handleDownload()}
+          disabled={busy}
+          data-testid={`import-sample-download-${spec.id}`}
+        >
+          下载 XLSX
+        </Button>
+      </Stack>
+    </Card>
   );
 }

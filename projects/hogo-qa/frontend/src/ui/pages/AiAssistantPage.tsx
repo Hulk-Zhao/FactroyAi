@@ -46,6 +46,7 @@ import {
   Add as AddIcon,
 } from '@mui/icons-material';
 import type { ReactElement } from 'react';
+import { SAMPLE_DATASETS } from '@/data/samples/sampleDatasets';
 import {
   buildAnalysisContext,
   buildDiagnosisMarkdown,
@@ -72,6 +73,7 @@ import { useAnalysisStore } from '@/store/analysisStore';
 import { useSettingsStore } from '@/store/settingsStore';
 import { useUiStore } from '@/store/uiStore';
 import EmptyState from '@/ui/components/EmptyState';
+import OfflineSampleChat from '@/ui/components/OfflineSampleChat';
 import ChatChartRefs from '@/ui/components/ChatChartRefs';
 import ConfirmDialog from '@/ui/components/ConfirmDialog';
 import { writeClipboard } from '@/ui/clipboard';
@@ -808,8 +810,19 @@ function AiAssistantContent(): ReactElement {
  */
 export default function AiAssistantPage(): ReactElement {
   const mode = useSettingsStore((s) => s.mode);
+  const dataset = useProjectStore((s) => s.dataset);
 
   if (mode !== 'ai') {
+    const matchedSpec = dataset
+      ? SAMPLE_DATASETS.find(
+          (s) => dataset.name === `样例 · ${s.title}`,
+        )
+      : null;
+
+    if (matchedSpec) {
+      return <OfflineSampleChat spec={matchedSpec} />;
+    }
+
     return (
       <Stack spacing={2} data-testid="ai-assistant-offline">
         <Stack direction="row" spacing={1} alignItems="center">

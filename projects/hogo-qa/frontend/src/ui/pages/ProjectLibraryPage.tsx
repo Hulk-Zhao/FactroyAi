@@ -36,6 +36,7 @@ import {
   Edit as EditIcon,
   FolderOpen as OpenIcon,
   Add as AddIcon,
+  PlayArrow as PlayArrowIcon,
 } from '@mui/icons-material';
 import type { ReactElement } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -44,9 +45,15 @@ import { getSharedRepositoryHandle } from '@/data/repositories/handle';
 import { forgetLastProject, rememberLastProject } from '@/ui/bootstrap/projectSession';
 import type { ProjectRepository } from '@/data/repositories/types';
 import type { Project, ProjectSummary } from '@/data/schema';
-import { useProjectStore } from '@/store/projectStore';
+import { buildProjectFromDataset, generateId, useProjectStore } from '@/store/projectStore';
+import { useUiStore } from '@/store/uiStore';
 import EmptyState from '@/ui/components/EmptyState';
 import ConfirmDialog from '@/ui/components/ConfirmDialog';
+import {
+  SAMPLE_DATASETS,
+  buildSampleDataset,
+  type SampleDatasetSpec,
+} from '@/data/samples/sampleDatasets';
 
 /* 仓库句柄改由 `@/data/repositories/handle` 提供会话级单例（全应用共用同一后端）。 */
 
@@ -109,6 +116,29 @@ export default function ProjectLibraryPage(props: ProjectLibraryPageProps = {}):
   const navigate = useNavigate();
   const setProject = useProjectStore((s) => s.setProject);
   const currentProjectId = useProjectStore((s) => s.project?.id ?? null);
+  const pushToast = useUiStore((s) => s.pushToast);
+  const [sampleDialogOpen, setSampleDialogOpen] = useState(false);
+
+  /** 导入样例数据到项目库。 */
+  const handleImportSample = async (spec: SampleDatasetSpec): Promise<void> => {
+    if (repo === null) {
+      pushToast('项目库尚未就绪，请稍后重试', 'warning');
+      return;
+    }
+    try {
+      const dataset = buildSampleDataset(spec);
+      const projectId = generateId('proj');
+      const project = buildProjectFromDataset(projectId, spec.title, { ...dataset, projectId });
+      await repo.repository.saveProject(project);
+      rememberLastProject(project.id);
+      setProject(project);
+      setSampleDialogOpen(false);
+      await refresh();
+      pushToast(`已导入样例「${spec.title}」并保存到项目库`, 'success');
+    } catch (e) {
+      pushToast(`样例导入失败：${e instanceof Error ? e.message : String(e)}`, 'error');
+    }
+  };
 
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [query, setQuery] = useState('');
@@ -258,9 +288,19 @@ export default function ProjectLibraryPage(props: ProjectLibraryPageProps = {}):
         <Typography variant="h6" fontWeight={600}>
           项目库
         </Typography>
-        <Button startIcon={<AddIcon />} variant="outlined" onClick={() => navigate('/import')}>
-          新建项目（前往导入）
-        </Button>
+        <Stack direction="row" spacing={1}>
+          <Button
+            startIcon={<PlayArrowIcon />}
+            variant="outlined"
+            onClick={() => setSampleDialogOpen(true)}
+            data-testid="import-sample-btn"
+          >
+            导入样例
+          </Button>
+          <Button startIcon={<AddIcon />} variant="outlined" onClick={() => navigate('/import')}>
+            新建项目（前往导入）
+          </Button>
+        </Stack>
       </Stack>
 
       {repo && repo.degraded ? (
@@ -388,6 +428,51 @@ export default function ProjectLibraryPage(props: ProjectLibraryPageProps = {}):
           </Button>
           <Button variant="contained" onClick={() => void confirmRename()}>
             保存
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* 样例导入对话框 */}
+      <Dialog open={sampleDialogOpen} onClose={() => setSampleDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>导入样例数据</DialogTitle>
+        <DialogContent>
+          <Stack spacing={1.5} sx={{ mt: 1 }}>
+            {SAMPLE_DATASETS.map((spec) => (
+              <Card
+                key={spec.id}
+                variant="outlined"
+                sx={{
+                  p: 2,
+                  cursor: 'pointer',
+                  transition: 'all 0.15s',
+                  '&:hover': { borderColor: 'primary.main', bgcolor: 'action.hover' },
+                }}
+                onClick={() => void handleImportSample(spec)}
+                data-testid={`library-sample-${spec.id}`}
+              >
+                <Stack direction="row" spacing={1} alignItems="flex-start">
+                  <PlayArrowIcon color="primary" sx={{ mt: 0.25 }} />
+                  <Box sx={{ flex: 1, minWidth: 0 }}>
+                    <Typography variant="subtitle2" fontWeight={700}>
+                      {spec.title}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {spec.scene}
+                    </Typography>
+                    <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
+                      {spec.tags.map((t) => (
+                        <Chip key={t} size="small" label={t} variant="outlined" />
+                      ))}
+                    </Stack>
+                  </Box>
+                </Stack>
+              </Card>
+            ))}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button color="inherit" onClick={() => setSampleDialogOpen(false)}>
+            关闭
           </Button>
         </DialogActions>
       </Dialog>
