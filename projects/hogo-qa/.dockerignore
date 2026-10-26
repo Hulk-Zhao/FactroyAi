@@ -1,0 +1,22 @@
+# .dockerignore —— 控制构建上下文体积与缓存有效性。
+# 前端 dist-server 在镜像构建阶段内重新生成，不随上下文带入。
+
+.git
+.github
+.probe
+.workbuddy
+.vscode
+.trae
+
+**/node_modules
+frontend/dist
+frontend/dist-server
+frontend/coverage
+
+backend/data/runtime
+backend/.env
+
+*.md
+!README.md
+start.bat
+*.tsbuildinfo

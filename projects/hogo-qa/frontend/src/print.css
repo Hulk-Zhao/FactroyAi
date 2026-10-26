@@ -1,0 +1,161 @@
+/* 打印 / PDF 原生样式（架构文档 §0.2 #1：不引入 jsPDF，使用浏览器原生打印）。 */
+
+@media print {
+  @page {
+    size: A4;
+    margin: 12mm;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  /* 打印时取消「屏幕视口高度 + 滚动容器」这套布局。
+     AppShell 是 height:100vh、内容区 overflow:auto；打印时 100vh 会按纸张高度
+     再撑出一整页，正文之后必然多出一张全空白页。 */
+  html,
+  body,
+  #root {
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  .print-shell {
+    height: auto !important;
+    display: block !important;
+  }
+
+  .print-main {
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  /* 隐藏交互元素：导航、按钮、配置面板 */
+  .no-print,
+  nav,
+  button {
+    display: none !important;
+  }
+
+  /* 图表与表格分页控制 */
+  .print-chart,
+  .print-table {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* ⚠️ 已停用：见文件末尾「不要在图表区用 .print-page-break」一节。
+     保留定义仅为兼容将来确有需要的场景，报表页**不要**再用它。 */
+  .print-page-break {
+    break-before: page;
+    page-break-before: always;
+  }
+
+  /* 图表卡片（标题 + 图形）整体不可跨页拆分。
+     否则会出现「标题留在上一页、图形被挤到下一页」的空白框观感。 */
+  [data-testid='report-charts'] > * {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  /* 预览长表（原始尺寸 / 原始不良）在纸上**按内容高度分页**（P6-B）。
+     实测依据 .probe/p6-print-pages.mjs 跑出的基线（4 页；产物 JSON 不入库）：第 3 页只用到 68.7%，
+     尾部空 242pt（约 8.5cm）。成因是这两张表在屏幕上是「限高 320px + 滚动」的
+     预览框，整块（标题 + 表）约 266pt，第 3 页只剩 242pt，浏览器只能整块推到
+     下一页 —— 纸上于是留出半页空白，标题还成了孤儿。
+     这里在打印态去掉限高与滚动（表按自然高度排版、可逐行断开），表头每页重复；
+     代价是纸上会印出全部预览行（屏幕仍限高 320px 滚动），行数由内容决定，
+     不想要长表时在导出选项里取消勾选「原始尺寸 / 原始不良」即可。
+     屏幕态完全不受影响（规则只在 @media print 里）。 */
+  .print-table-split,
+  .print-table-split .MuiTableContainer-root,
+  .print-table-split table,
+  .print-table-split tbody {
+    break-inside: auto !important;
+    page-break-inside: auto !important;
+  }
+
+  .print-table-split .MuiTableContainer-root {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  /* 表头每页重复（MUI 的 stickyHeader 在纸上只会把首行钉在原地） */
+  .print-table-split thead {
+    display: table-header-group;
+  }
+
+  .print-table-split th {
+    position: static !important;
+  }
+
+  /* 纸上每张预览表最多印 24 行（约一页）：屏幕预览 200 行照单全印会分页爆炸
+     （120 行原始尺寸 ≈ 4 页纯数据）。被截掉的部分在纸上**有明示**：
+     ReportPage 里的 `print-cap-note-raw-*` 只在打印态显示，
+     与这里的 24 行上限成对出现，缺一不可。 */
+  .print-table-split tbody tr:nth-child(n + 25) {
+    display: none !important;
+  }
+}
+
+/* ============================================================================
+   打印快照（P4-A）——「打印没有图片」的真正修法。
+   ----------------------------------------------------------------------------
+   P3 曾试图在 beforeprint 里把图表**重新挂载**成打印版面；实测（真实打印路径）
+   证明 Chrome 取快照时 DOM 里一块画布都没有（React 卸载了旧的、新的还没画），
+   于是纸上只剩卡片标题、图形一片空白。
+   P4 改为在 beforeprint 里**同步**把已渲染的画布光栅成高分辨率位图并插进 DOM
+   （见 src/ui/charts/printLayout.ts），下面这两条规则负责让位图顶替原图表。
+   注意：故意不写在 @media print 里 —— 打印预览对话框打开期间屏幕上也应该是
+   同一张图，避免「预览和屏幕不一致」这种二次困惑。
+   ========================================================================== */
+.print-chart.has-print-snapshot > *:not(canvas.print-chart-snapshot) {
+  display: none !important;
+}
+
+canvas.print-chart-snapshot {
+  display: block !important;
+  width: 100% !important;
+  height: auto !important;
+}
+
+@media print {
+  /* ★ 不要在图表区用 .print-page-break（break-before: page）。
+     真实回归（P4-A 二次验证发现，用户视角＝「报表多印了一张空白纸」）：
+     只要图表区带 break-before: page，Chrome 在**第一次**打印时就会先吐出一张
+     全空白页（实测 5 页：第 1 页正文 / 第 2 页墨迹 0.0001 / 第 3 页控制图 /
+     第 4 页能力图 / 第 5 页尾注），而图表内容本身完全正常。
+     A/B 对照（.probe/p4-one.mjs，每个场景都是**全新页面上的第一次打印**）：
+       as-is（Stack 带 print-page-break）  → 5 页（含空白页）
+       去掉 break-before                   → 4 页（无空白）★ 采用
+       改成 display:block / flex           → 都与 display 无关，仍是 5 页
+       给快照 canvas 限高                  → 仍是 5 页
+       把 break-before 挪到前面的空 div    → 仍是 5 页
+     结论：成因就是 break-before 本身，与 flex/高度无关，因此直接不用它。
+     图表卡片自身仍受下面的 .print-chart / [data-testid='report-charts'] > *
+     的 break-inside: avoid 保护，不会被拆成两页。 */
+
+  /* 让图表尽量吃满 A4 可打印宽（用户反馈「界面太小」）：
+     屏幕上的内容区内边距与卡片内边距在纸上没有意义，直接清零。
+     实测收益：图像放置宽度 157.8mm → 约 177mm（可打印宽 186mm 的 95%）。 */
+  .print-main {
+    padding: 0 !important;
+  }
+
+  [data-testid='report-charts'] .MuiCardContent-root {
+    padding: 4px 0 0 !important;
+  }
+
+  /* 兜底：万一快照引擎没跑起来（没有 ECharts 实例等），至少别让画布溢出纸张。 */
+  .print-chart canvas:not(.print-chart-snapshot) {
+    max-width: 100% !important;
+    height: auto !important;
+  }
+
+  /* 「打印/PDF 不含图表」勾选关闭时，隐藏图表（仅作用于打印，不影响 Excel） */
+  body.print-hide-charts .print-chart {
+    display: none !important;
+  }
+}

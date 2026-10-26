@@ -1,0 +1,6 @@
+{
+  "hogo-qa-sample.xlsx": {
+    "title": "标准样例 · 机加工三特性",
+    "description": "3 特性 × 50 点合成数据：能力充足 / 临界 / 漂移三档，含 6 类不良（柏拉图）。由 frontend/samples/make-sample.mjs 确定性生成，数字可用一条命令复算。"
+  }
+}

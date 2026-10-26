@@ -1,0 +1,28 @@
+# docker-compose —— Hogo-QA-tool 单容器部署。
+#
+# 用法：docker compose up -d --build
+# 访问：http://<服务器IP>:8788（口令默认 123，AUTH_PASSWORD 可覆盖）
+#
+# 如需自定义端口，改 ports 的宿主侧并同步设置 PORT 环境变量即可。
+
+services:
+  hogo-qa:
+    build: .
+    container_name: hogo-qa
+    ports:
+      - "8788:8788"
+    environment:
+      # 演示口令（防刷门禁）；公网部署请改为强口令。
+      AUTH_PASSWORD: "123"
+      # 可选：固定 HMAC 密钥（不设则自动生成并持久化到挂载卷）。
+      # AUTH_SECRET: "change-me-to-a-long-random-string"
+      # 可选防刷参数：
+      # RATE_MAX_FAILS: "5"
+      # RATE_LOCK_MINUTES: "10"
+    volumes:
+      # 持久化自动生成的密钥，容器重建后会话不失效。
+      - hogo-runtime:/app/backend/data/runtime
+    restart: unless-stopped
+
+volumes:
+  hogo-runtime:
