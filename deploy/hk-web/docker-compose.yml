@@ -10,9 +10,27 @@ services:
       - "443:443"
     environment:
       TZ: Asia/Shanghai
+      # 对外域名：主域名 + 兼容域名同时写进 server_name。
+      # 备案通过后把 PUBLIC_DOMAIN 与 CERT_DOMAIN 改成 hulkai.cn 即可切回，无需改 Nginx 配置。
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-hulkai.xyz}
+      PUBLIC_DOMAIN_ALIASES: ${PUBLIC_DOMAIN_ALIASES:-hulkai.cn www.hulkai.cn www.hulkai.xyz}
+      # 证书 lineage 目录名（certbot 首签 -d 的第一个域名）
+      CERT_DOMAIN: ${CERT_DOMAIN:-hulkai.xyz}
+      # default（含 443）| default.http（首签证书时的 HTTP-only）
+      NGINX_CONF: ${NGINX_CONF:-default}
+    # 启动时只替换这三个变量，保留 Nginx 自身的 $host/$uri/$http_upgrade 等变量
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        envsubst '$${PUBLIC_DOMAIN} $${PUBLIC_DOMAIN_ALIASES} $${CERT_DOMAIN}' \
+          < "/etc/nginx/templates/$${NGINX_CONF}.conf.template" \
+          > /etc/nginx/conf.d/default.conf
+        exec nginx -g 'daemon off;'
     volumes:
-      # 首次签发证书时用 NGINX_CONF=default.http.conf（此时 443 证书还不存在）
-      - ./nginx/${NGINX_CONF:-default.conf}:/etc/nginx/conf.d/default.conf:ro
+      # 模板在容器启动时渲染到 /etc/nginx/conf.d/default.conf
+      - ./nginx/templates:/etc/nginx/templates:ro
       # 站点根目录：site/public
       - ../../site/public:/usr/share/nginx/html:ro
       # 各项目前端：/demo/<project>/ 通过 alias 映射到这里

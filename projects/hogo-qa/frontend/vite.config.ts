@@ -31,7 +31,7 @@ function localStamp(): string {
 
 export default defineConfig({
   // 部署基路径：默认相对路径（本地直连 8788 / 独立域名都可用）。
-  // 挂在子路径（如 hulkai.cn/demo/hogo-qa/）时由构建参数 HOGO_BASE 注入，
+  // 挂在子路径（如 /demo/hogo-qa/）时由构建参数 HOGO_BASE 注入，
   // 供 Router basename 与 API 前缀复用（见 src/main.tsx、services/auth/authClient.ts）。
   base: process.env.HOGO_BASE || './',
   // 开发代理：登录鉴权与样例 API 走 backend/（零依赖 Node 服务，默认 8788）。

@@ -8,7 +8,7 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 COPY frontend/ ./
-# 部署基路径：默认相对路径；挂在子路径（hulkai.cn/demo/hogo-qa/）时由
+# 部署基路径：默认相对路径；挂在子路径（如 /demo/hogo-qa/）时由
 # deploy/hk-web 的 compose 传入 /demo/hogo-qa/，前端据此推导路由 basename 与 API 前缀。
 ARG HOGO_BASE=./
 ENV HOGO_BASE=${HOGO_BASE}

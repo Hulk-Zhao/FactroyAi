@@ -1,6 +1,7 @@
 # hulkai
 
-个人站点与项目包：`hulkai.cn` 的主页、技术博客，以及各项目的前端与后端。
+个人站点与项目包：`hulkai.xyz` 的主页、技术博客，以及各项目的前端与后端。
+（`hulkai.cn` 备案完成前暂不可用，部署配置保留为兼容域名。）
 
 单仓分层，两台服务器拉同一份代码，各自用一份 compose 部署：
 
@@ -57,7 +58,7 @@ git push origin main                 # 服务器 pull 到的就是这次改动
 | 要加的东西 | 存放位置 | 还要改什么 |
 |---|---|---|
 | 博客文章 | `site/public/blog/<slug>.html`；列表在 `site/public/blog/index.html`，主页卡片在 `site/public/index.html` | 不用改 Nginx，`git pull` 后刷新即可 |
-| 纯静态 Demo（原生 HTML，或已构建好、无后端） | `projects/<项目>/web/` | `deploy/hk-web/nginx/default.conf` 加 `location ^~ /demo/<项目>/` 的 alias；`site/public/demo/index.html` 加一张卡 |
+| 纯静态 Demo（原生 HTML，或已构建好、无后端） | `projects/<项目>/web/` | `deploy/hk-web/nginx/templates/default.conf.template` 加 `location ^~ /demo/<项目>/` 的 alias；`site/public/demo/index.html` 加一张卡 |
 | 前后端分离的新项目 | 前端 `projects/<项目>/frontend/`，后端 `projects/<项目>/backend/`（Python 项目可用 `api/`，见 `projects/mfg-agent/api`） | 香港 compose 加前端容器或 alias；广州 `deploy/gz-api/docker-compose.yml` 加后端服务；Nginx 加反代 |
 | 密钥 / 环境变量 | `deploy/<主机>/.env`（不入库），示例写进对应的 `.env.example` | — |
 
@@ -109,6 +110,12 @@ docker compose -f deploy/gz-api/docker-compose.yml logs -f app
 cp deploy/hk-web/.env.example deploy/hk-web/.env   # 必改 HOGO_AUTH_PASSWORD
 ```
 
+对外域名不再写死在 Nginx 里：`PUBLIC_DOMAIN`（默认 `hulkai.xyz`）、
+`PUBLIC_DOMAIN_ALIASES`（默认同时包含 `hulkai.cn` / `www.hulkai.cn` / `www.hulkai.xyz`）、
+`CERT_DOMAIN`（证书 lineage 目录）都在 `deploy/hk-web/.env` 里配置，容器启动时渲染
+`deploy/hk-web/nginx/templates/*.template`。备案通过后只改 `PUBLIC_DOMAIN` / `CERT_DOMAIN`
+两个变量即可切回 `hulkai.cn`，不用改配置或重新构建前端。
+
 证书签发步骤见 [deploy/hk-web/README.md](deploy/hk-web/README.md)。
 
 APS 前端由 `deploy/hk-web/docker-compose.yml` 的 `smart-aps-frontend` 服务在 `git pull` 后
@@ -136,8 +143,10 @@ APS 后端（`aps-postgres` + `aps-backend`）随同一个 compose 启动，首�
 docker compose exec -T aps-postgres psql -U aps -d aps < aps-seed-m1.sql
 ```
 
-APS 的 JWT 密钥、数据库口令、admin 首启口令与安全模式都可以在 `deploy/gz-api/.env` 覆盖：
-`APS_SECURITY_JWT_SECRET`、`APS_DB_PASSWORD`、`APS_ADMIN_INIT_PASSWORD`、`APS_SECURITY_MODE`。
+APS 的 JWT 密钥、数据库口令、admin 首启口令、安全模式与 WebSocket 来源白名单都可以在
+`deploy/gz-api/.env` 覆盖：`APS_SECURITY_JWT_SECRET`、`APS_DB_PASSWORD`、
+`APS_ADMIN_INIT_PASSWORD`、`APS_SECURITY_MODE`、`APS_SECURITY_WS_ALLOWED_ORIGINS`。
+后者的默认值以 `hulkai.xyz` 为准，并同时包含 `hulkai.cn` 兼容项；换域名只改这一个变量。
 默认安全模式为 `prod`（所有接口需登录），演示账号 `admin`，首启口令默认 `ApsDemo2026`，
 **上线前务必覆盖**。
 
@@ -153,8 +162,8 @@ Docker 的 `-p` 会绕过 ufw，宿主机防火墙拦不住。
   首次启动由 entrypoint 复制到 `mfg_data` volume；已存在则跳过，不覆盖线上数据。
 - 需要配置的变量见 `projects/mfg-agent/api/.env.example`：对话/分析模型、向量模型、
   `AUTH_SECRET`、Chroma 路径等。
-- 香港侧的 `.env` 只用于 `hogo-qa` 的演示口令，见 `deploy/hk-web/.env.example`
-  （`HOGO_AUTH_PASSWORD`；不建 `.env` 则用默认口令 `123`，公网务必覆盖）。
+- 香港侧的 `.env` 用于 `hogo-qa` 演示口令与对外域名，见 `deploy/hk-web/.env.example`
+  （`HOGO_AUTH_PASSWORD`；域名相关变量均有默认值，不建 `.env` 也能用 `hulkai.xyz` 启动）。
 
 ## 说明
 

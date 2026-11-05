@@ -119,8 +119,9 @@ services:
       APS_SECURITY_JWT_SECRET: ${APS_SECURITY_JWT_SECRET:-aps-demo-jwt-secret-change-me-0123456789abcdef}
       APS_SECURITY_JWT_TTL_SECONDS: ${APS_SECURITY_JWT_TTL_SECONDS:-28800}
       APS_ADMIN_INIT_PASSWORD: ${APS_ADMIN_INIT_PASSWORD:-ApsDemo2026}
-      # STOMP Origin 白名单：必须包含香港站点域名，否则求解进度 WebSocket 会被拒
-      APS_SECURITY_WS_ALLOWED_ORIGINS: ${APS_SECURITY_WS_ALLOWED_ORIGINS:-https://hulkai.cn,https://www.hulkai.cn}
+      # STOMP Origin 白名单：必须包含香港站点域名，否则求解进度 WebSocket 会被拒。
+      # 以 hulkai.xyz 为准，同时保留 hulkai.cn 兼容；换域名只改 deploy/gz-api/.env 的同名变量。
+      APS_SECURITY_WS_ALLOWED_ORIGINS: ${APS_SECURITY_WS_ALLOWED_ORIGINS:-https://hulkai.xyz,https://hulkai.cn,https://www.hulkai.cn,https://www.hulkai.xyz}
       APS_BUSINESS_TIME_ZONE: Asia/Shanghai
     ports:
       # 只给香港反代；云安全组需限制来源 43.132.214.124/32

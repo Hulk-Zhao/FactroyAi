@@ -58,14 +58,25 @@ function isMockMode(): boolean {
   return import.meta.env.VITE_ENABLE_MOCK === 'true'
 }
 
-/** WS 地址：优先 VITE_WS_BASE_URL（网关/独立端口），否则同源 /ws。 */
+/**
+ * WS 地址：同源拼接，运行期取当前 host，构建产物里不含任何域名。
+ *
+ * <p>VITE_WS_BASE_URL 可传绝对地址（wss://gateway/...）或站点内相对前缀
+ * （如 /demo/mfg-agent-platform）；留空时回退到构建基路径 BASE_URL，
+ * 保证子路径部署也命中 /demo/<project>/ws/ 而不会被站点根路径的 Nginx 截走。</p>
+ */
 export function resolveSolveWsUrl(taskId: string | number): string {
-  const base = (import.meta.env.VITE_WS_BASE_URL as string | undefined)?.trim()
-  if (base) {
-    return `${base.replace(/\/+$/, '')}/ws/solve-tasks/${encodeURIComponent(taskId)}`
-  }
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${window.location.host}/ws/solve-tasks/${encodeURIComponent(taskId)}`
+  const origin = `${protocol}//${window.location.host}`
+  const configured = (import.meta.env.VITE_WS_BASE_URL as string | undefined)?.trim()
+  let base: string
+  if (configured && /^wss?:\/\//i.test(configured)) {
+    base = configured.replace(/\/+$/, '')
+  } else {
+    const prefix = configured || import.meta.env.BASE_URL
+    base = `${origin}${prefix.startsWith('/') ? prefix : `/${prefix}`}`.replace(/\/+$/, '')
+  }
+  return `${base}/ws/solve-tasks/${encodeURIComponent(taskId)}`
 }
 
 /**

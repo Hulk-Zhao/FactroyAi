@@ -1,9 +1,9 @@
 # 首次签发证书专用的 HTTP-only 配置。
-# 用法：NGINX_CONF=default.http.conf docker compose up -d nginx
-# 证书签发完成后再切回 default.conf（含 443）。
+# 用法：NGINX_CONF=default.http docker compose up -d nginx
+# 证书签发完成后再切回 default（含 443）。
 server {
     listen 80;
-    server_name hulkai.cn www.hulkai.cn;
+    server_name ${PUBLIC_DOMAIN} ${PUBLIC_DOMAIN_ALIASES};
 
     location /.well-known/acme-challenge/ {
         root /var/www/certbot;
