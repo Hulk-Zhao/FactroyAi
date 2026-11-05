@@ -56,6 +56,23 @@ export function clearAuthToken(): void {
   }
 }
 
+/**
+ * 401 统一处理：清掉失效令牌并回到登录页。
+ * 登录页自身不再跳转，避免“401 → 跳登录 → 登录页 401”的死循环；
+ * 用 replace 而不是 assign，避免用户点后退又回到刚失败的页面。
+ */
+function handleUnauthorized(): void {
+  clearAuthToken()
+  if (typeof window === 'undefined') {
+    return
+  }
+  const loginPath = `${import.meta.env.BASE_URL}login`
+  if (window.location.pathname === loginPath) {
+    return
+  }
+  window.location.replace(`${loginPath}?redirected=1`)
+}
+
 /** 分页/查询参数序列化：数组按逗号拼接，跳过空值。 */
 function serializeParams(params: Record<string, unknown>): string {
   const search = new URLSearchParams()
@@ -154,6 +171,9 @@ http.interceptors.response.use(
     if (isResultEnvelope(envelope)) {
       setTrace(traceId || envelope.traceId)
       if (envelope.code !== 0) {
+        if (envelope.code === 40100) {
+          handleUnauthorized()
+        }
         const error = new ApiError(
           envelope.code,
           resolveErrorMessage(envelope.code, envelope.message),
@@ -181,6 +201,9 @@ http.interceptors.response.use(
       setTrace(traceId)
       if (isResultEnvelope(axiosError.response?.data)) {
         const envelope = axiosError.response.data
+        if (envelope.code === 40100) {
+          handleUnauthorized()
+        }
         const apiError = new ApiError(
           envelope.code,
           resolveErrorMessage(envelope.code, envelope.message),
@@ -191,6 +214,9 @@ http.interceptors.response.use(
         throw apiError
       }
       const status = axiosError.response?.status
+      if (status === 401) {
+        handleUnauthorized()
+      }
       const code = status === 401 ? 40100 : status === 403 ? 40300 : status === 404 ? 40400 : 0
       const message = status
         ? resolveErrorMessage(code, `请求失败（HTTP ${status}）`)
