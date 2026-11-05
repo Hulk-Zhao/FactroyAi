@@ -1,0 +1,16 @@
+# 后端镜像构建上下文（仓库根目录）排除项，减小上下文体积、避免把产物打进去
+.git
+.gitignore
+.github
+.gitlab-ci.yml
+.idea
+.vscode
+**/target
+**/node_modules
+aps-frontend
+docs
+*.md
+.env
+.env.*
+*.log
+.screenshots

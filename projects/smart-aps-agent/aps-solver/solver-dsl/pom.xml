@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.hengce.aps</groupId>
+        <artifactId>aps-solver</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>solver-dsl</artifactId>
+    <name>solver-dsl</name>
+    <description>约束 DSL 的解析、校验与编译（白名单 rule_code + 参数，YAML safe load）</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>aps-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>solver-api</artifactId>
+        </dependency>
+        <!-- YAML safe load；版本由 spring-boot-starter-parent 统一管理 -->
+        <dependency>
+            <groupId>org.yaml</groupId>
+            <artifactId>snakeyaml</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

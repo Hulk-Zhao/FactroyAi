@@ -1,0 +1,27 @@
+# =============================================================================
+# 叠加文件：把本地依赖端口仅发布到宿主机 127.0.0.1，供 IDE / 本机客户端直连调试
+#
+# 用法（只在内网调试时叠加，默认栈不发布任何宿主端口）：
+#   PowerShell : .\scripts\dev-up.ps1 -ExposeDebug
+#   Bash       : ./scripts/dev-up.sh --expose-debug
+#   手动       : docker compose --env-file .env \
+#                  -f deploy/docker-compose.dev.yml \
+#                  -f deploy/docker-compose.dev.expose.yml up -d --wait
+#
+# 端口与架构页 5.1 的调试约定一致：MinIO 9010/9011；PG/Redis 使用标准端口，
+# 但都显式绑定 127.0.0.1，避免暴露到局域网。
+# =============================================================================
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:${POSTGRES_DEBUG_PORT:-5432}:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:${REDIS_DEBUG_PORT:-6379}:6379"
+
+  minio:
+    ports:
+      - "127.0.0.1:${MINIO_API_DEBUG_PORT:-9010}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_DEBUG_PORT:-9011}:9001"

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.hengce.aps.infrastructure.persistence.mapper.process.routing.RoutingEdgeMapper">
+
+    <resultMap id="routingEdgeResultMap"
+               type="com.hengce.aps.infrastructure.persistence.process.routing.RoutingEdge">
+        <id property="id" column="id"
+            typeHandler="com.hengce.aps.infrastructure.persistence.process.template.handler.UuidTypeHandler"/>
+        <result property="tenantId" column="tenant_id"/>
+        <result property="routingId" column="routing_id"/>
+        <result property="fromNodeId" column="from_node_id"/>
+        <result property="toNodeId" column="to_node_id"/>
+        <result property="dependType" column="depend_type"/>
+        <result property="lagMinutes" column="lag_minutes"/>
+        <result property="version" column="version"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="updatedBy" column="updated_by"/>
+        <result property="deleted" column="deleted"/>
+    </resultMap>
+
+    <sql id="baseColumns">
+        id, tenant_id, routing_id, from_node_id, to_node_id, depend_type, lag_minutes,
+        version, created_at, updated_at, created_by, updated_by, deleted
+    </sql>
+
+    <select id="selectByRoutingId" resultMap="routingEdgeResultMap">
+        SELECT <include refid="baseColumns"/>
+        FROM routing_edge
+        WHERE routing_id = #{routingId}
+          AND deleted = false
+        ORDER BY from_node_id ASC, to_node_id ASC, depend_type ASC
+    </select>
+
+    <insert id="insert" parameterType="com.hengce.aps.infrastructure.persistence.process.routing.RoutingEdge">
+        INSERT INTO routing_edge (
+            <include refid="baseColumns"/>
+        ) VALUES (
+            #{id}, #{tenantId}, #{routingId}, #{fromNodeId}, #{toNodeId}, #{dependType},
+            #{lagMinutes}, #{version}, #{createdAt}, #{updatedAt}, #{createdBy}, #{updatedBy}, #{deleted}
+        )
+    </insert>
+
+    <update id="deleteByRoutingId">
+        UPDATE routing_edge
+        SET deleted = true,
+            updated_at = now()
+        WHERE routing_id = #{routingId}
+          AND deleted = false
+    </update>
+</mapper>

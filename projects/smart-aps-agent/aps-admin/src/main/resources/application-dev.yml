@@ -1,0 +1,44 @@
+# 开发环境配置（P0-05 提供：数据源 + Flyway）
+# 说明：本文件仅承载 dev profile 的数据库配置，不覆盖 application.yml。
+# 依赖前提（由 P0-01 负责，P0-05 不改 pom）：
+#   1) org.postgresql:postgresql
+#   2) org.flywaydb:flyway-core + org.flywaydb:flyway-database-postgresql（Flyway 10+ 模块化）
+#   3) 将仓库根目录 db/migration 纳入 classpath（Maven resources 复制），
+#      或在本地运行时把 locations 改为 filesystem:db/migration。
+spring:
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:aps}
+    username: ${DB_USER:aps}
+    password: ${DB_PASSWORD:aps_dev_pwd}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+      pool-name: aps-hikari
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    validate-on-migrate: true
+    out-of-order: false
+    clean-disabled: true
+    encoding: UTF-8
+
+logging:
+  level:
+    org.flywaydb: INFO
+
+# P2-7：prod 默认关闭 springdoc，dev 显式打开便于联调
+springdoc:
+  api-docs:
+    enabled: true
+  swagger-ui:
+    enabled: true
+
+# 通知 outbox 轮询驱动（C33）：dev 显式打开；prod 保持 application.yml 的默认 false
+aps:
+  notification:
+    scheduler:
+      enabled: true
+      interval-ms: 30000

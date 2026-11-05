@@ -62,6 +62,38 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  # smart-aps-agent：智能 APS 排产平台前端（Vue3 + Vite 产物）
+  # 只对香港本机暴露，由上面的 nginx 反代到 /demo/mfg-agent-platform/；
+  # /api 与 /ws 由容器内 Nginx 转发到广州 APS 后端，不占用公网端口。
+  smart-aps-frontend:
+    build:
+      context: ../../projects/smart-aps-agent/aps-frontend
+      dockerfile: Dockerfile
+      args:
+        # 三处对齐：构建基路径、路由 basename、接口/WS 前缀
+        APS_BASE: /demo/mfg-agent-platform/
+        VITE_API_BASE_URL: /demo/mfg-agent-platform/api/v1
+        VITE_WS_BASE_URL: /demo/mfg-agent-platform
+    image: ${APS_FRONTEND_IMAGE:-hulkai-smart-aps-frontend:latest}
+    container_name: hulkai_smart_aps_frontend
+    environment:
+      TZ: Asia/Shanghai
+      # 广州 APS 后端（仅安全组放行香港 IP）
+      APS_BACKEND_URL: ${APS_BACKEND_URL:-http://129.204.108.45:8085}
+    expose:
+      - "8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
   certbot:
     image: certbot/certbot:latest
     container_name: hulkai_certbot

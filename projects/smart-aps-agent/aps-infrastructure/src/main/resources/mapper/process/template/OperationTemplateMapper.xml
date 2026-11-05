@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.hengce.aps.infrastructure.persistence.mapper.process.template.OperationTemplateMapper">
+
+    <resultMap id="operationTemplateResultMap"
+               type="com.hengce.aps.infrastructure.persistence.process.OperationTemplate">
+        <id property="id" column="id"
+            typeHandler="com.hengce.aps.infrastructure.persistence.process.template.handler.UuidTypeHandler"/>
+        <result property="tenantId" column="tenant_id"/>
+        <result property="code" column="code"/>
+        <result property="name" column="name"/>
+        <result property="primaryResourceId" column="primary_resource_id"/>
+        <result property="primaryResourceGroupId" column="primary_resource_group_id"/>
+        <result property="secondaryResourceIds" column="secondary_resource_ids"
+                typeHandler="com.hengce.aps.infrastructure.persistence.process.template.handler.UuidListJsonbTypeHandler"/>
+        <result property="inputMaterialIds" column="input_material_ids"
+                typeHandler="com.hengce.aps.infrastructure.persistence.process.template.handler.UuidListJsonbTypeHandler"/>
+        <result property="outputMaterialId" column="output_material_id"/>
+        <result property="standardSeconds" column="standard_seconds"/>
+        <result property="setupSeconds" column="setup_seconds"/>
+        <result property="teardownSeconds" column="teardown_seconds"/>
+        <result property="templateVersion" column="template_version"/>
+        <result property="version" column="version"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="createdBy" column="created_by"/>
+        <result property="updatedBy" column="updated_by"/>
+        <result property="deleted" column="deleted"/>
+    </resultMap>
+
+    <sql id="baseColumns">
+        id, tenant_id, code, name, primary_resource_id, primary_resource_group_id,
+        secondary_resource_ids, input_material_ids, output_material_id,
+        standard_seconds, setup_seconds, teardown_seconds, template_version,
+        version, created_at, updated_at, created_by, updated_by, deleted
+    </sql>
+
+    <insert id="insert" parameterType="com.hengce.aps.infrastructure.persistence.process.OperationTemplate">
+        INSERT INTO operation_template (
+            <include refid="baseColumns"/>
+        ) VALUES (
+            #{id}, #{tenantId}, #{code}, #{name}, #{primaryResourceId}, #{primaryResourceGroupId},
+            #{secondaryResourceIds,typeHandler=com.hengce.aps.infrastructure.persistence.process.template.handler.UuidListJsonbTypeHandler},
+            #{inputMaterialIds,typeHandler=com.hengce.aps.infrastructure.persistence.process.template.handler.UuidListJsonbTypeHandler},
+            #{outputMaterialId}, #{standardSeconds}, #{setupSeconds}, #{teardownSeconds},
+            #{templateVersion}, #{version}, #{createdAt}, #{updatedAt},
+            #{createdBy}, #{updatedBy}, #{deleted}
+        )
+    </insert>
+
+    <update id="update" parameterType="com.hengce.aps.infrastructure.persistence.process.OperationTemplate">
+        UPDATE operation_template
+        SET code = #{code},
+            name = #{name},
+            primary_resource_id = #{primaryResourceId},
+            primary_resource_group_id = #{primaryResourceGroupId},
+            secondary_resource_ids = #{secondaryResourceIds,typeHandler=com.hengce.aps.infrastructure.persistence.process.template.handler.UuidListJsonbTypeHandler},
+            input_material_ids = #{inputMaterialIds,typeHandler=com.hengce.aps.infrastructure.persistence.process.template.handler.UuidListJsonbTypeHandler},
+            output_material_id = #{outputMaterialId},
+            standard_seconds = #{standardSeconds},
+            setup_seconds = #{setupSeconds},
+            teardown_seconds = #{teardownSeconds},
+            template_version = #{templateVersion},
+            version = #{version} + 1,
+            updated_at = #{updatedAt},
+            updated_by = #{updatedBy}
+        WHERE id = #{id}
+          AND version = #{version}
+          AND deleted = false
+    </update>
+
+    <select id="selectById" resultMap="operationTemplateResultMap">
+        SELECT <include refid="baseColumns"/>
+        FROM operation_template
+        WHERE id = #{id}
+          AND deleted = false
+    </select>
+
+    <update id="deleteById">
+        UPDATE operation_template
+        SET deleted = true,
+            updated_at = now()
+        WHERE id = #{id}
+          AND deleted = false
+    </update>
+
+    <select id="countByCodeVersion" resultType="long">
+        SELECT COUNT(1)
+        FROM operation_template
+        WHERE deleted = false
+          AND code = #{code}
+          AND template_version = #{templateVersion}
+        <if test="excludeId != null">
+            AND id &lt;&gt; #{excludeId}
+        </if>
+    </select>
+
+    <select id="selectPageByFilter" resultMap="operationTemplateResultMap">
+        SELECT <include refid="baseColumns"/>
+        FROM operation_template t
+        WHERE t.deleted = false
+        <if test="code != null and code != ''">
+            AND t.code LIKE CONCAT('%', #{code}, '%')
+        </if>
+        <if test="name != null and name != ''">
+            AND t.name LIKE CONCAT('%', #{name}, '%')
+        </if>
+        <if test="resourceType != null and resourceType != ''">
+            AND EXISTS (
+                SELECT 1
+                FROM resource r
+                WHERE r.id = t.primary_resource_id
+                  AND r.deleted = false
+                  AND r.type = #{resourceType}
+            )
+        </if>
+        <choose>
+            <when test="sortColumn != null and sortColumn != ''">
+                ORDER BY ${sortColumn}
+                <choose>
+                    <when test="sortDirection == 'ASC' or sortDirection == 'asc'">ASC</when>
+                    <otherwise>DESC</otherwise>
+                </choose>
+            </when>
+            <otherwise>
+                ORDER BY t.created_at DESC
+            </otherwise>
+        </choose>
+        , t.id ASC
+    </select>
+</mapper>

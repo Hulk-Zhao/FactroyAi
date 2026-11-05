@@ -1,0 +1,91 @@
+# =============================================================================
+# 前端 Nginx 配置模板（由 nginx 官方镜像启动时 envsubst 渲染到 conf.d/default.conf）
+#   APS_BACKEND_URL 由部署环境注入，默认 http://aps-backend:8080
+#   SPA 路由：createWebHistory 需要所有未命中静态资源的路径回退到 /index.html
+#   运行镜像为 nginx-unprivileged（uid 101），仅能监听非特权端口，故使用 8080
+# =============================================================================
+server {
+    listen 8080;
+    listen [::]:8080;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    charset utf-8;
+    client_max_body_size 20m;
+
+    gzip on;
+    gzip_static on;   # 优先使用构建期预生成的 .gz（M3 性能整改），避免每次请求现算
+    gzip_comp_level 5;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/javascript application/json application/xml image/svg+xml;
+    # 说明：官方 nginx 镜像未编译 ngx_brotli，故 .br 仅预生成备用；接入带 brotli 模块的网关后可启用 brotli_static。
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    # 容器健康检查端点
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # 带 hash 的静态资源长期缓存
+    location /assets/ {
+        access_log off;
+        expires 1y;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+    }
+
+    # 接口转发到后端；变量 + Docker 内置 DNS 使后端未就绪时 nginx 也能正常启动
+    location /api/ {
+        resolver 127.0.0.11 valid=30s ipv6=off;
+        set $aps_backend ${APS_BACKEND_URL};
+        proxy_pass $aps_backend;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_connect_timeout 10s;
+        proxy_send_timeout 60s;
+        # 排产求解可能长耗时
+        proxy_read_timeout 300s;
+    }
+
+    # 求解进度 STOMP WebSocket：/ws/solve-tasks/{id}
+    # 子路径部署时由香港 Nginx 剥掉前缀后转发到这里，浏览器侧仍带前缀。
+    location /ws/ {
+        resolver 127.0.0.11 valid=30s ipv6=off;
+        set $aps_ws_backend ${APS_BACKEND_URL};
+        proxy_pass $aps_ws_backend;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 求解进度推送期间保持长连接
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # SPA 路由回退
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # index.html 不缓存，确保发版后立即生效
+    location = /index.html {
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+    }
+}

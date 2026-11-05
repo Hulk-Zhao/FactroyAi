@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.hengce.aps</groupId>
+        <artifactId>mfg-aps-platform</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>aps-domain</artifactId>
+    <name>aps-domain</name>
+    <description>领域模型与仓储抽象</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>aps-common</artifactId>
+        </dependency>
+        <!--
+          仅注解包：BaseEntity 需要 @TableId/@Version/@TableLogic/@TableField 标记，
+          不引入 MyBatis-Plus 运行时；版本统一由父 pom 的 mybatis-plus.version 管理。
+        -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-annotation</artifactId>
+            <version>${mybatis-plus.version}</version>
+        </dependency>
+    </dependencies>
+</project>

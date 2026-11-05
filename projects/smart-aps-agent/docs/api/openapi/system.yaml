@@ -1,0 +1,870 @@
+openapi: 3.0.3
+info:
+  title: 衡策 APS - 系统管理 API
+  version: 0.1.0
+  description: |
+    system 分组静态契约（P0-08）。GET /health 已实现；认证、用户、角色、权限、审计已完成制品级 HTTP 验收（2026-11-04），标 implemented；/configs 仍为占位（501）。
+    统一约定见 ../../docs/api/conventions.md；密码、令牌禁止写入日志。
+servers:
+  - url: /api/v1
+tags:
+  - name: 健康检查
+  - name: 认证
+  - name: 用户
+  - name: 角色
+  - name: 审计
+  - name: 配置
+paths:
+  /health:
+    x-milestone: OPS
+    get:
+      operationId: health
+      tags: [健康检查]
+      summary: 健康检查
+      description: 状态：已实现。用于存活探针，不访问数据库。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfHealth'
+  /auth/login:
+    x-milestone: M3
+    post:
+      operationId: login
+      tags: [认证]
+      summary: 登录
+      description: |
+        状态：代码已落地（AuthController#login，aps-web/src/main/java/com/hengce/aps/web/controller/rbac/AuthController.java:56-64）；
+        已完整制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。bcrypt 校验；5 次失败锁 15 分钟；返回 HS256 JWT（TTL 28800s）。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfLogin'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /me:
+    x-milestone: M3
+    get:
+      operationId: getMe
+      tags: [认证]
+      summary: 当前用户
+      description: |
+        状态：代码已落地（MeController#me，aps-web/src/main/java/com/hengce/aps/web/controller/rbac/MeController.java:50-57）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。返回用户信息 + 角色码 + 权限码并集；off 模式回落 V1 管理员（00000000-0000-0000-0000-000000000301）。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfMe'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /users:
+    x-milestone: M1
+    get:
+      operationId: listUsers
+      tags: [用户]
+      summary: 用户列表
+      description: |
+        状态：代码已落地（UserController#list，aps-web/src/main/java/com/hengce/aps/web/controller/rbac/UserController.java:58-62）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。需要 SYS_USER 权限；status 为精确过滤。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [ACTIVE, DISABLED, LOCKED]
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfUserPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      operationId: createUser
+      tags: [用户]
+      summary: 创建用户
+      description: |
+        状态：代码已落地（UserController#create，aps-web/src/main/java/com/hengce/aps/web/controller/rbac/UserController.java:73-77）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。需要 SYS_USER；用户名租户内唯一；`password` 必填（缺失 400/40000）；密码仅以 bcrypt 落库。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserCreateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfUser'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /audit-logs:
+    x-milestone: M1
+    get:
+      operationId: listAuditLogs
+      tags: [审计]
+      summary: 审计日志查询
+      description: |
+        状态：代码已落地（AuditLogController#list，aps-web/src/main/java/com/hengce/aps/web/controller/rbac/AuditLogController.java:56-69）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。需要 SYS_AUDIT；过滤条件 AND；时间区间 [from, to)；sort 仅 createdAt,asc|desc。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: resourceType
+          in: query
+          schema:
+            type: string
+        - name: resourceId
+          in: query
+          description: 资源业务标识
+          schema:
+            type: string
+        - name: userId
+          in: query
+          description: 操作人主键
+          schema:
+            type: string
+            format: uuid
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfAuditLogPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /users/{userId}:
+    x-milestone: M3
+    patch:
+      operationId: updateUser
+      tags: [用户]
+      summary: 修改用户
+      description: |
+        状态：代码已落地（UserController#update，aps-web/src/main/java/com/hengce/aps/web/controller/rbac/UserController.java:89-93）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。字段为 null 表示不改；roleCodes 非 null 时全量替换；
+        version 缺失或不匹配由服务层返回 40901；禁止停用自己/最后一个 ADMIN。
+      x-implementation-status: implemented
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: 用户主键
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfUser'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /roles:
+    x-milestone: M3
+    get:
+      operationId: listRoles
+      tags: [角色]
+      summary: 角色列表
+      description: |
+        状态：代码已落地（RoleController#list，aps-web/src/main/java/com/hengce/aps/web/controller/rbac/RoleController.java:51-54）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。需要 SYS_USER 权限；不分页。返回 `data = {items: Role[]}`；与 /permissions 的裸数组形状不同，按代码现状保留。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfRoleList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      operationId: createRole
+      tags: [角色]
+      summary: 创建角色
+      description: |
+        状态：代码已落地（RoleController#create，aps-web/src/main/java/com/hengce/aps/web/controller/rbac/RoleController.java:64-68）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。需要 SYS_ROLE；code 必须匹配 `^[A-Z][A-Z0-9_]{1,31}$`；权限码必须是 V1 的 18 个闭集。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoleCreateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfRole'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /roles/{roleId}/permissions:
+    x-milestone: M3
+    put:
+      operationId: replaceRolePermissions
+      tags: [角色]
+      summary: 替换角色权限
+      description: |
+        状态：代码已落地（RoleController#replacePermissions，aps-web/src/main/java/com/hengce/aps/web/controller/rbac/RoleController.java:79-83）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。需要 SYS_ROLE；全量替换并落审计；空数组表示清空。
+      x-implementation-status: implemented
+      parameters:
+        - name: roleId
+          in: path
+          required: true
+          description: 角色主键
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RolePermissionsRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfRole'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /permissions:
+    x-milestone: M3
+    get:
+      operationId: listPermissions
+      tags: [角色]
+      summary: 权限点列表
+      description: |
+        状态：代码已落地（PermissionController#list，aps-web/src/main/java/com/hengce/aps/web/controller/rbac/PermissionController.java:41-44）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。仅需已认证；返回 V1 的 18 个权限码。
+        注意：`data` 是**裸数组**（`Result<List<PermissionView>>`），不包 `{items}`；与 /roles 的 `{items}` 形状不一致是已知现状。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfPermissionList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /configs:
+    x-milestone: M1
+    get:
+      operationId: getConfigs
+      tags: [配置]
+      summary: 读取系统配置
+      description: 状态：占位。
+      x-implementation-status: placeholder
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfConfigs'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    put:
+      operationId: updateConfigs
+      tags: [配置]
+      summary: 更新系统配置
+      description: 状态：占位。写入审计日志。
+      x-implementation-status: placeholder
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigUpdateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfConfigs'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+components:
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    Size:
+      name: size
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 20
+    Sort:
+      name: sort
+      in: query
+      schema:
+        type: string
+        example: createdAt,desc
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: 幂等键，8-128 位 [A-Za-z0-9._:-]
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+  responses:
+    BadRequest:
+      description: 参数错误（code=40000）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Unauthorized:
+      description: 未认证（code=40100）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Forbidden:
+      description: 无权限（code=40300）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    NotFound:
+      description: 资源不存在（code=40400）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Conflict:
+      description: 状态或幂等冲突（code=40900/40901）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Unprocessable:
+      description: 业务校验失败（code=42200）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    TooManyRequests:
+      description: 限流（code=42900）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    NotImplemented:
+      description: 占位端点未实现（HTTP 501，code=50100）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+  schemas:
+    Result:
+      type: object
+      required: [code, message, traceId]
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          nullable: true
+        traceId:
+          type: string
+    Health:
+      type: object
+      properties:
+        status:
+          type: string
+          example: UP
+        service:
+          type: string
+          example: aps-admin
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+    LoginResult:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        tokenType:
+          type: string
+          enum: [Bearer]
+        expiresIn:
+          type: integer
+          description: 秒
+        userId:
+          type: string
+          format: uuid
+    Me:
+      type: object
+      description: 当前用户视图（MeView）；字段取自 aps-service/.../service/rbac/MeView.java，形状未经制品级验收
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        displayName:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+        phone:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/UserStatus'
+        lastLoginAt:
+          type: string
+          format: date-time
+          nullable: true
+        version:
+          type: integer
+        roleCodes:
+          type: array
+          items:
+            type: string
+        permissions:
+          type: array
+          description: 当前用户权限码并集
+          items:
+            type: string
+    Role:
+      type: object
+      description: 角色视图（RoleView）；字段取自 aps-service/.../service/rbac/RoleView.java，形状未经制品级验收
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        permissionCodes:
+          type: array
+          items:
+            type: string
+        version:
+          type: integer
+    RoleList:
+      type: object
+      description: GET /roles 的 data 形状；代码返回 `{items}`（RoleListResponse）
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Role'
+    Permission:
+      type: object
+      description: 权限点视图（PermissionView）；字段取自 aps-service/.../service/rbac/PermissionView.java，形状未经制品级验收
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        name:
+          type: string
+        module:
+          type: string
+        description:
+          type: string
+          nullable: true
+    RoleCreateRequest:
+      type: object
+      required: [code, name]
+      description: 字段取自 aps-web/.../dto/rbac/RoleCreateRequest.java
+      properties:
+        code:
+          type: string
+          pattern: '^[A-Z][A-Z0-9_]{1,31}$'
+        name:
+          type: string
+          maxLength: 64
+        description:
+          type: string
+          maxLength: 255
+        permissionCodes:
+          type: array
+          items:
+            type: string
+    RolePermissionsRequest:
+      type: object
+      required: [permissionCodes]
+      description: 字段取自 aps-web/.../dto/rbac/RolePermissionsRequest.java；空数组表示清空
+      properties:
+        permissionCodes:
+          type: array
+          items:
+            type: string
+    UserStatus:
+      type: string
+      enum: [ACTIVE, DISABLED, LOCKED]
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        displayName:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+        phone:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/UserStatus'
+        lastLoginAt:
+          type: string
+          format: date-time
+          nullable: true
+        version:
+          type: integer
+        roleCodes:
+          type: array
+          description: 角色码（代码 UserView 返回该字段）
+          items:
+            type: string
+    UserCreateRequest:
+      type: object
+      required: [username, password]
+      description: |
+        C30 §25.1.4：`password` 在 M3 必填（本地 bcrypt；LDAP/SSO 不在 M3）。
+        源码 `UserCreateRequest.java` 对 `password` 标注 `@NotBlank`，缺省返回 400/40000。
+      properties:
+        username:
+          type: string
+          maxLength: 64
+        displayName:
+          type: string
+        email:
+          type: string
+          format: email
+        phone:
+          type: string
+        password:
+          type: string
+          format: password
+        roleCodes:
+          type: array
+          items:
+            type: string
+    UserUpdateRequest:
+      type: object
+      description: |
+        修改用户请求（UserUpdateRequest）；字段为 null 表示不修改，roleCodes 非 null 时全量替换。
+        字段取自 aps-web/src/main/java/com/hengce/aps/web/dto/rbac/UserUpdateRequest.java，形状未经制品级验收。
+      properties:
+        version:
+          type: integer
+          description: 缺省或不匹配由服务层返回 40901
+        displayName:
+          type: string
+          maxLength: 128
+          nullable: true
+        email:
+          type: string
+          format: email
+          maxLength: 128
+          nullable: true
+        phone:
+          type: string
+          maxLength: 32
+          nullable: true
+        status:
+          $ref: '#/components/schemas/UserStatus'
+        roleCodes:
+          type: array
+          items:
+            type: string
+        password:
+          type: string
+          format: password
+          maxLength: 128
+          description: 新口令，bcrypt 落库
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: 主键（int64）；代码 AuditLogView.id 为 long，非 uuid
+        traceId:
+          type: string
+        userId:
+          type: string
+          format: uuid
+          nullable: true
+        action:
+          type: string
+        resourceType:
+          type: string
+        resourceId:
+          type: string
+        beforeValue:
+          type: object
+          nullable: true
+        afterValue:
+          type: object
+          nullable: true
+        clientIp:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+    SystemConfig:
+      type: object
+      properties:
+        key:
+          type: string
+        value:
+          type: string
+        description:
+          type: string
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+    ConfigUpdateRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [key, value]
+            properties:
+              key:
+                type: string
+              value:
+                type: string
+    ResultOfHealth:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/Health'
+    ResultOfLogin:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/LoginResult'
+    ResultOfUser:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/User'
+    ResultOfUserPage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/User'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer
+    ResultOfAuditLogPage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/AuditLog'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer
+    ResultOfConfigs:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/SystemConfig'
+    ResultOfMe:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/Me'
+    ResultOfRole:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/Role'
+    ResultOfRoleList:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/RoleList'
+    ResultOfPermissionList:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: array
+              description: 裸数组，不包 {items}（与 /roles 不一致是已知现状）
+              items:
+                $ref: '#/components/schemas/Permission'

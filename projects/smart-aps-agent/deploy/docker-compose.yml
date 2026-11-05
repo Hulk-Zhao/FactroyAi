@@ -1,0 +1,320 @@
+# =============================================================================
+# 衡策 APS 一键整栈（M1-QA-02 建立，M2-QA-03 改为「制品挂载」）
+#   PostgreSQL 15 / Redis 7 / MinIO / aps-backend / aps-frontend
+#
+# M2-QA-03 变更（部署环节不再编译任何业务代码，构建制品归 W9）：
+#   - aps-backend 不再使用 aps-admin/Dockerfile 在镜像里跑 mvn package，
+#     改为 deploy/backend/Dockerfile 的运行时镜像 + 只读挂载已构建的 fat jar
+#     （默认 ../aps-admin/target/aps-admin-0.1.0-SNAPSHOT.jar，可用 APS_BACKEND_JAR 覆盖）。
+#     因此容器内运行的 jar 与仓库里的制品是同一份文件，SHA256 可逐字节核对。
+#   - aps-frontend 同理不再在镜像里跑 npm ci/build，改为只读挂载
+#     aps-frontend/dist 静态产物（可用 APS_FRONTEND_DIST 覆盖）。
+#   - 源码构建方式仍保留在 aps-admin/Dockerfile / aps-frontend/Dockerfile（未改动），
+#     仅不在一键部署链路中使用。
+#
+# 与 docker-compose.dev.yml 的区别：
+#   - dev 栈只提供中间件，供宿主机 IDE 里运行的前后端使用；
+#   - 本栈把后端运行时镜像与前端静态产物也编排进来，
+#     一条命令即可得到可访问的完整环境。
+#   - 工程名固定为 aps-stack，与 dev 栈的 aps-dev
+#     容器/网络/卷前缀隔离，避免误伤本地开发栈。
+#
+# 启动方式（推荐，脚本会检查 Docker/端口、准备 .env、构建镜像并等待健康检查）：
+#   PowerShell : .\scripts\stack-up.ps1
+#   Bash       : ./scripts/stack-up.sh
+# 手动启动（minio-init 是 profiles: init 的一次性任务，不参与 up --wait）：
+#   注意必须带 --project-name aps-stack，否则根 .env 的 COMPOSE_PROJECT_NAME=aps-dev
+#   会覆盖顶层 name，与 dev 栈共享 project label。
+#   docker compose --env-file .env --project-name aps-stack -f deploy/docker-compose.yml \
+#     up -d --build --wait postgres redis minio aps-backend aps-frontend
+#   docker compose --env-file .env --project-name aps-stack -f deploy/docker-compose.yml \
+#     --profile init run --rm --no-deps -T minio-init
+#
+# 端口（对齐 aps-arch-page 5.1）：
+#   前端入口 80 -> 宿主机 ${APS_FRONTEND_PORT:-80}（映射到 nginx-unprivileged 容器 8080）；
+#   后端 8080 -> 宿主机 ${APS_BACKEND_PORT:-8080}（架构页允许「或仅内网」，可在 .env 覆盖）；
+#   中间件 postgres/redis/minio 仅加入 aps-net 内网，不发布宿主端口。
+# =============================================================================
+
+name: aps-stack
+
+# 容器日志统一走 json-file + 轮转，避免单机长期运行把磁盘写满
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 15：业务库；首次初始化只创建 pgcrypto / pg_trgm 扩展，
+  # 业务表由后端 Flyway（db/migration）在 aps-backend 启动时创建。
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15
+    container_name: aps-stack-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aps}
+      POSTGRES_USER: ${POSTGRES_USER:-aps}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required, copy .env.example to .env first}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_connections=100
+      - -c
+      - log_min_duration_statement=1000
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    expose:
+      - "5432"
+    networks:
+      - aps-net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    stop_grace_period: 30s
+    shm_size: 256mb
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Redis 7：缓存 + Redis Stream 事件总线（MVP 用它替代 RabbitMQ）
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7
+    container_name: aps-stack-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required, copy .env.example to .env first}
+      TZ: Asia/Shanghai
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --requirepass
+      - ${REDIS_PASSWORD}
+    volumes:
+      - redisdata:/data
+    expose:
+      - "6379"
+    networks:
+      - aps-net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli -h 127.0.0.1 -p 6379 -a "$$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 20s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # MinIO：附件对象存储（9000 = S3 API，9001 = Console），仅内网
+  # 镜像说明与 dev 栈一致：官方社区镜像已下架，默认用 pgsty/minio 固定 RELEASE tag，
+  # 内网 Harbor 可通过 MINIO_IMAGE 覆盖。
+  # ---------------------------------------------------------------------------
+  minio:
+    image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z}
+    container_name: aps-stack-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-apsminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required, copy .env.example to .env first}
+      TZ: Asia/Shanghai
+    command:
+      - server
+      - /data
+      - --address
+      - :9000
+      - --console-address
+      - :9001
+    volumes:
+      - miniodata:/data
+    expose:
+      - "9000"
+      - "9001"
+    networks:
+      - aps-net
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - http://127.0.0.1:9000/minio/health/live
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    stop_grace_period: 20s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # aps-backend：Spring Boot 单体。运行时镜像只装 JRE + curl，
+  #   业务 jar 以只读方式从宿主机挂载（APS_BACKEND_JAR），确保容器内运行的
+  #   就是 W9 交付的那份 fat jar，不再在部署环节重新编译。
+  #   依赖 postgres / redis / minio 健康后再启动；Flyway 由 APS_FLYWAY_ENABLED 开关。
+  # ---------------------------------------------------------------------------
+  aps-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: ${APS_BACKEND_IMAGE:-aps-stack/aps-backend:local}
+    container_name: aps-stack-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ${APS_BACKEND_JAR:-../aps-admin/target/aps-admin-0.1.0-SNAPSHOT.jar}:/app/app.jar:ro
+    environment:
+      TZ: Asia/Shanghai
+      SPRING_PROFILES_ACTIVE: ${APS_SPRING_PROFILES:-dev}
+      # 后端 application.yml / application-dev.yml 使用 DB_* 占位符，这里指向内网服务名
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB:-aps}
+      DB_USER: ${POSTGRES_USER:-aps}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required, copy .env.example to .env first}
+      # 同时注入 Spring 标准变量，名称与 .env.example 保持一致（优先级高于 yml）
+      SPRING_DATASOURCE_URL: "jdbc:postgresql://postgres:5432/${POSTGRES_DB:-aps}"
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-aps}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required, copy .env.example to .env first}
+      # Flyway 自动迁移开关（默认开启；设 APS_FLYWAY_ENABLED=false 可跳过）
+      # 迁移脚本已由 aps-admin/Dockerfile 的 COPY db/migration 打进镜像，
+      # 使用 application-dev.yml 默认的 classpath:db/migration，无需挂载或额外 location。
+      SPRING_FLYWAY_ENABLED: ${APS_FLYWAY_ENABLED:-true}
+      # Redis（Spring Boot 3.2+ 前缀；当前后端尚未引入客户端，属契约预留）
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: "6379"
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required, copy .env.example to .env first}
+      # MinIO（变量名与 .env.example 一致；当前 aps.storage.minio.* 尚未被后端读取）
+      APS_MINIO_ENDPOINT: http://minio:9000
+      APS_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-apsminio}
+      APS_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required, copy .env.example to .env first}
+      APS_MINIO_BUCKET: ${MINIO_BUCKET:-aps-attachments}
+      # 认证（变量名与后端 aps.security.* 对齐；mode 与密钥都必须显式提供）
+      APS_SECURITY_MODE: ${APS_SECURITY_MODE:?APS_SECURITY_MODE is required (prod/dev/off), copy .env.example to .env first}
+      APS_SECURITY_JWT_SECRET: ${APS_SECURITY_JWT_SECRET:?APS_SECURITY_JWT_SECRET is required (>=32 bytes), copy .env.example to .env first}
+      APS_SECURITY_JWT_TTL_SECONDS: ${APS_SECURITY_JWT_TTL_SECONDS:-28800}
+      APS_SECURITY_API_KEYS_WRITE: ${APS_SECURITY_API_KEYS_WRITE:-}
+      APS_SECURITY_API_KEYS_READ: ${APS_SECURITY_API_KEYS_READ:-}
+      APS_SECURITY_WS_ALLOWED_ORIGINS: ${APS_SECURITY_WS_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+    ports:
+      - "${APS_BACKEND_PORT:-8080}:8080"
+    networks:
+      - aps-net
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - http://127.0.0.1:8080/api/v1/health
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      # 首次启动要跑 Flyway（28 张表），给足冷启动时间
+      start_period: 90s
+    stop_grace_period: 30s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # aps-frontend：Nginx 托管 Vue 构建产物，/api 反代到 aps-backend:8080
+  #   dist 静态产物与 nginx 配置模板均从宿主机只读挂载，部署环节不跑 npm。
+  # ---------------------------------------------------------------------------
+  aps-frontend:
+    image: ${APS_FRONTEND_IMAGE:-nginxinc/nginx-unprivileged:1.31-alpine}
+    container_name: aps-stack-frontend
+    restart: unless-stopped
+    depends_on:
+      aps-backend:
+        condition: service_healthy
+    volumes:
+      - ${APS_FRONTEND_DIST:-../aps-frontend/dist}:/usr/share/nginx/html:ro
+      - ../aps-frontend/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    environment:
+      # 与 Dockerfile 默认值一致；此处显式声明，便于排障时确认实际指向
+      APS_BACKEND_URL: http://aps-backend:8080
+      TZ: Asia/Shanghai
+    ports:
+      # nginx-unprivileged 容器内监听 8080，宿主 80 映射到 8080
+      - "${APS_FRONTEND_PORT:-80}:8080"
+    networks:
+      - aps-net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    stop_grace_period: 10s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # 一次性初始化：等 MinIO 健康后创建附件桶。
+  # 放在 init profile 下，避免普通 up --wait 把「已退出的一次性容器」判为未就绪；
+  # 由 stack-up 脚本显式执行：docker compose ... --profile init run --rm --no-deps -T minio-init
+  # ---------------------------------------------------------------------------
+  minio-init:
+    image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z}
+    container_name: aps-stack-minio-init
+    restart: "no"
+    profiles:
+      - init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-apsminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required, copy .env.example to .env first}
+      MINIO_BUCKET: ${MINIO_BUCKET:-aps-attachments}
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - |
+        set -eu
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null
+        mc mb --ignore-existing "local/$$MINIO_BUCKET" >/dev/null
+        echo "[minio-init] bucket ready: $$MINIO_BUCKET"
+    networks:
+      - aps-net
+    logging: *default-logging
+
+networks:
+  aps-net:
+    driver: bridge
+    name: aps-stack-aps-net
+
+volumes:
+  pgdata:
+    name: aps-stack-pgdata
+  redisdata:
+    name: aps-stack-redisdata
+  miniodata:
+    name: aps-stack-miniodata

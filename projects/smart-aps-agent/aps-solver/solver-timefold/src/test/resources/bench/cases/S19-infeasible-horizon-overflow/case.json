@@ -1,0 +1,57 @@
+{
+    "caseId":  "S19-infeasible-horizon-overflow",
+    "kind":  "INFEASIBLE",
+    "sizeClass":  "SMALL",
+    "tags":  [
+                 "infeasible",
+                 "capacity"
+             ],
+    "seed":  0,
+    "budget":  {
+                   "timeoutSeconds":  3,
+                   "unimprovedSecondsSpentLimit":  2,
+                   "maximumStepCount":  0
+               },
+    "problem":  {
+                    "anchor":  "2026-01-05T00:00:00",
+                    "orders":  1,
+                    "operationsPerOrder":  10,
+                    "ordersWithoutRouting":  0,
+                    "resources":  1,
+                    "secondaryResources":  0,
+                    "secondaryWindowHours":  0,
+                    "qty":  60,
+                    "standardSeconds":  1800,
+                    "setupSeconds":  600,
+                    "dueOffsetDays":  [
+                                          1,
+                                          2,
+                                          3
+                                      ],
+                    "priorityCycle":  [
+                                          "NORMAL",
+                                          "HIGH",
+                                          "URGENT"
+                                      ],
+                    "familyCycle":  [
+                                        "FAM-A",
+                                        "FAM-B"
+                                    ],
+                    "calendar":  "NONE",
+                    "setupMatrix":  "NONE",
+                    "frozenCount":  0,
+                    "frozenOverlap":  false,
+                    "frozenStartHourOffset":  8,
+                    "initialOrders":  0,
+                    "initialStartHourOffset":  8,
+                    "explicitDependencies":  false,
+                    "allTasksSecondary":  true
+                },
+    "expectation":  {
+                        "status":  "INFEASIBLE",
+                        "hardScoreAtMost":  -1,
+                        "expectedHardCodes":  [
+                                                  "resourceNoOverlap"
+                                              ]
+                    }
+}

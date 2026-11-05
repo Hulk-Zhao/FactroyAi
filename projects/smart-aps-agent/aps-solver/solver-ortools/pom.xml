@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.hengce.aps</groupId>
+        <artifactId>aps-solver</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>solver-ortools</artifactId>
+    <name>solver-ortools</name>
+    <description>OR-Tools CP-SAT 适配实现（MVP 预留）</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>aps-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>solver-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.ortools</groupId>
+            <artifactId>ortools-java</artifactId>
+            <version>${ortools.version}</version>
+        </dependency>
+    </dependencies>
+</project>

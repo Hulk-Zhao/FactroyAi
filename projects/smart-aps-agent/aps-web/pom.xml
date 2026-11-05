@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.hengce.aps</groupId>
+        <artifactId>mfg-aps-platform</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>aps-web</artifactId>
+    <name>aps-web</name>
+    <description>REST API 层：Controller、参数校验与统一响应</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>aps-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>aps-domain</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>aps-service</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
+        </dependency>
+        <!-- M2-SE-03：求解进度 STOMP 推送（原生 WebSocket + SimpleBroker） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+        <!-- M2-SE-03：Controller 直接引用 aps-infrastructure 的持久化实体与仓储（如 RoutingController），
+             且测试需加载 SolveTaskRepository，故按 compile 作用域显式声明（覆盖 aps-service 的传递依赖） -->
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>aps-infrastructure</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- M2-SE-03 真库验收测试：仅测试作用域使用 PostgreSQL 驱动 -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 真库验收测试自管 schema：由 Flyway 按 db/migration 迁移到最新版本（V1→V7），
+             与生产同一条迁移链，避免测试库停留在手工建表时的旧结构 -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+            <version>${flyway.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+            <version>${flyway.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

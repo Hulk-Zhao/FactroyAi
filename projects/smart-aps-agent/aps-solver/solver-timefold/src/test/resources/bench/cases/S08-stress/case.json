@@ -1,0 +1,62 @@
+{
+    "caseId":  "S08-stress",
+    "kind":  "SMOKE",
+    "category":  "stress-reference",
+    "sizeClass":  "SMALL",
+    "tags":  [
+                 "smoke",
+                 "setup",
+                 "calendar",
+                 "frozen",
+                 "secondary",
+                 "stress-reference"
+             ],
+    "seed":  0,
+    "budget":  {
+                   "timeoutSeconds":  3,
+                   "unimprovedSecondsSpentLimit":  2,
+                   "maximumStepCount":  0
+               },
+    "problem":  {
+                    "anchor":  "2026-01-05T00:00:00",
+                    "orders":  3,
+                    "operationsPerOrder":  2,
+                    "ordersWithoutRouting":  0,
+                    "resources":  2,
+                    "secondaryResources":  1,
+                    "secondaryWindowHours":  16,
+                    "qty":  12,
+                    "standardSeconds":  600,
+                    "setupSeconds":  600,
+                    "dueOffsetDays":  [
+                                          1,
+                                          2,
+                                          3
+                                      ],
+                    "priorityCycle":  [
+                                          "NORMAL",
+                                          "HIGH",
+                                          "URGENT"
+                                      ],
+                    "familyCycle":  [
+                                        "FAM-A",
+                                        "FAM-B"
+                                    ],
+                    "calendar":  "DAY_SHIFT",
+                    "setupMatrix":  "MATERIAL_CODE",
+                    "frozenCount":  1,
+                    "frozenOverlap":  false,
+                    "frozenStartHourOffset":  8,
+                    "initialOrders":  0,
+                    "initialStartHourOffset":  8,
+                    "explicitDependencies":  false,
+                    "allTasksSecondary":  true
+                },
+    "expectation":  {
+                        "status":  "REFERENCE",
+                        "expectedHardCodes":  [
+
+                                              ],
+                        "note":  "原始题面：辅助资源只有 day0 一段 16h，6 个 2h10 任务超过 day0 主资源 4 个位，容量上界被突破。记录实测 hard/soft，不作通过线；hard<0 为预期结果。"
+                    }
+}

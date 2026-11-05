@@ -1,0 +1,1794 @@
+openapi: 3.0.3
+info:
+  title: 衡策 APS - 订单与场景 API
+  version: 0.1.0
+  description: |
+    orders 分组静态契约（P0-08）。GET /orders 已实现；订单写、策略、场景代码已落地但未做制品级 HTTP 验收，标 partial；
+    ATP 交期预估已于 2026-11-05 完成制品级 HTTP 验收（C46），标 implemented；订单开工已于 2026-11-04 完成制品级 HTTP 验收（四条证据齐），标 implemented。
+    统一约定见 ../../docs/api/conventions.md。
+servers:
+  - url: /api/v1
+tags:
+  - name: 订单
+  - name: 策略
+  - name: 场景
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+      tags: [订单]
+      summary: 订单列表
+      description: 状态：已实现。统一分页出参。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOrderPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    post:
+      operationId: createOrder
+      tags: [订单]
+      summary: 创建订单
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：POST /orders → 200/code 0，ORD-LB-002 落库 DRAFT/UNFROZEN/version=1）。
+        默认 DRAFT/UNFROZEN；orderNo 在租户内唯一，重复返回 409/40900。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderCreateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOrder'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /orders/{orderNo}:
+    get:
+      operationId: getOrder
+      tags: [订单]
+      summary: 订单详情
+      description: 状态：已实现。
+      x-implementation-status: implemented
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          description: 订单业务编码
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOrder'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: updateOrder
+      tags: [订单]
+      summary: 更新订单
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：PUT /orders/ORD-LB-002 → 200/code 0，version 1→2，qty/HIGH 落库）。
+        仅 `DRAFT` 可修改；非 `DRAFT` 返回 42200。
+        乐观锁：请求必须携带当前 `version`，与服务端 `orders.version` 不一致返回 40901。
+        `orderNo` 不可修改；允许修改 materialCode/qty/dueDate/priority/customerId/routingId/remark/extAttrs。
+        路径参数为 order_no；域内 `/{orderNo}` 已加正则排除 export/import 保留段（C38）。
+      x-implementation-status: implemented
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          description: 订单业务编码 order_no
+          schema:
+            type: string
+            maxLength: 64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderUpdateRequest'
+      responses:
+        '200':
+          description: 成功，返回更新后的订单（version 已递增）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOrder'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 版本冲突（40901）或重复/幂等冲突（40900）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /orders/{orderNo}/confirm:
+    put:
+      operationId: confirmOrder
+      tags: [订单]
+      summary: 确认订单
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：PUT /orders/ORD-LB-002/confirm → 200/code 0，version 2→3，status=DRAFT→CONFIRMED）。
+        路径参数为 order_no；DRAFT → CONFIRMED。
+        幂等：重复确认返回 200，不重复执行副作用；目标状态幂等，不强制 Idempotency-Key。
+      x-implementation-status: implemented
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          description: 订单业务编码 order_no
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOrder'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /orders/{orderNo}/freeze:
+    put:
+      operationId: freezeOrder
+      tags: [订单]
+      summary: 冻结/解冻订单
+      description: |
+        状态：代码已落地（OrderController#freeze，aps-web/src/main/java/com/hengce/aps/web/controller/OrderController.java:161-165）；
+        未做制品级 HTTP 验收，故标 partial。路径参数为 order_no。
+        同一端点承载四态冻结与解冻：body `freezeStatus=UNFROZEN` 即解冻，**不提供独立 `/unfreeze`**。
+        - LOCKED_TIME_WINDOW 必填 lockFrom/lockTo，to > from；缺失返回 400/40000
+        - LOCKED_RESOURCE 必填 lockedResourceCodes（trim+去重后非空），否则 42200
+        - UNFROZEN/FROZEN 自动清空锁信息（幂等，不报错）
+        锁信息落 orders.ext_attrs.freezeLock，不新增列；OrderView 暴露只读 freezeLock。
+        version 不一致返回 40901。
+        验收（2026-11-04）：LOCKED_TIME_WINDOW → 200/code 0，version 4→5；UNFROZEN → 200/code 0，version 5→6，锁信息清空。
+      x-implementation-status: implemented
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          description: 订单业务编码 order_no
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderFreezeRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOrder'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /orders/{orderNo}/priority:
+    put:
+      operationId: updateOrderPriority
+      tags: [订单]
+      summary: 修改订单优先级
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：PUT /orders/ORD-LB-002/priority → 200/code 0，priority=NORMAL→URGENT，version 3→4）。
+        优先级只影响软约束 PRIORITY_RESPECT，不改硬约束；URGENT 不提供抢占/插队语义。
+        version 不一致返回 40901。
+      x-implementation-status: implemented
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderPriorityRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOrder'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /orders/{orderNo}/release:
+    put:
+      operationId: releaseOrder
+      tags: [订单]
+      summary: 释放订单
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：PUT /orders/ORD-LB-002/release → 200/code 0，status=CONFIRMED→RELEASED、freeze=FROZEN、version 6→7；
+        重复释放 → 200/code 0 且 version 保持 7）。DRAFT/CONFIRMED/SCHEDULED -> RELEASED，并自动把订单下 PLANNED 任务置为 FROZEN。
+        body 可空：{reason?, version?}。重复释放幂等返回 200，version 不变且不重复写审计。
+        非法状态流转返回 42200；version 不一致返回 40901。
+      x-implementation-status: implemented
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderVersionRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOrder'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /orders/{orderNo}/start:
+    put:
+      operationId: startOrder
+      tags: [订单]
+      summary: 订单开工
+      description: |
+        状态：已实现并完成制品级 HTTP 验收（2026-11-04，构建终验车道在新制品上实测四条证据）。
+        `OrderController#start` 注册 `PUT /api/v1/orders/{orderNo}/start`（C23：RELEASED→IN_PROGRESS，自动冻结 PLANNED 任务，重复开工幂等）。
+        4a 正常开工：HTTP 200、`status=IN_PROGRESS`、`version 2→3`、`traceId=a5f52cc1690a448997eda8d69f395ade`；落库 `M3-SMOKE-REL | IN_PROGRESS | UNFROZEN | version=3`，任务两行 `PLANNED→FROZEN` 且 `lock_type=FROZEN`。
+        4b 重复开工幂等：HTTP 200、`status=IN_PROGRESS`、`version=3` 不再上涨、`traceId=24349fc537584ad9b520781c07449f71`。
+        4c 非 RELEASED（CONFIRMED）：HTTP 422 / `code=42200`、`traceId=a3bcaf12e75548019cbebd5bd0509b9e`，message「只有 RELEASED 状态的订单可开工…」，库内 `M3-SMOKE-CONF | CONFIRMED | version=1` 未变。
+        4d 乐观锁旧版本重放（库内 2 / 提交 1）：HTTP 409 / `code=40901`、`traceId=93100369032048519dd2591fbc9d8566`，message「订单已被其他请求修改，请刷新后重试」，库内 `M3-SMOKE-STALE | RELEASED | version=2` 的 version 未变更。
+      x-implementation-status: implemented
+      parameters:
+        - name: orderNo
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrderVersionRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOrder'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /orders/atp:
+    x-milestone: M3
+    post:
+      operationId: atp
+      tags: [订单]
+      summary: ATP 交期预估
+      description: |
+        状态：已实现（C46，制品级 HTTP 验收 2026-11-05：FAST → 200/code 0、accuracy=ESTIMATE，5 次采样 0.060–0.368s；
+        ACCURATE → 200/code 0、accuracy=VERIFIED、earliestDeliveryDate=2026-11-05；ACCURATE timeoutSeconds=1 →
+        200/code 0、status=TIMEOUT、accuracy=UNVERIFIED 且不返回日期）。
+        只读端点：mainPlanWritten 恒为 false，不写 plan_version/task/task_adjustment/orders/solve_task；
+        capacityLockSuggestion 仅为建议（advisoryOnly=true）。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AtpRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfAtp'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /orders/ctp:
+    x-milestone: M3
+    x-contract-id: C53
+    post:
+      operationId: ctpInquiry
+      tags: [订单]
+      summary: CTP 交期承诺询单
+      description: |
+        状态：**partial**——物料侧已实现，容量验证待 C2；`PROMISED` 仍不可达。
+        当前实现只做物料可齐日判定；物料可齐但容量未验证时返回 `verdict=UNVERIFIED`，
+        `promisedDate`/`promisedQty`/`capacityVerifiedAt`/`solver` 必须全为 null，不得对外宣称已承诺。
+
+        同步只读询单：只有 verdict=PROMISED 才返回 promisedDate/promisedQty，且必须来自 ACCURATE 求解结果；
+        禁止用 FAST 日期、规则日期或请求日期替代。超视野是业务状态 OUT_OF_HORIZON（HTTP 200），不是错误。
+        并发忙返回 503/code=50300 + Retry-After；限流另用 429/42900。单次上限 15s。
+        不写 plan_version/task/orders/solve_task；mainPlanWritten 恒为 false。
+      x-implementation-status: partial
+      x-implementation-note: 物料侧已实现且已真机验证（UNPROMISABLE / UNVERIFIED 可达）；容量验证车道进行中，PROMISED 仍不可达
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CtpRequest'
+      responses:
+        '200':
+          description: 询单结论（可能是 UNVERIFIED / PROMISED / UNPROMISABLE / OUT_OF_HORIZON / NO_ROUTE / NO_MATERIAL / SOLVER_TIMEOUT）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfCtp'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '503':
+          description: 并发忙（code=50300）；按 Retry-After 秒数重试
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: 建议重试等待秒数
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+  /strategies:
+    get:
+      operationId: listStrategies
+      tags: [策略]
+      summary: 策略列表
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：GET /strategies?name=LB-Strategy-B → 200/code 0，total=2）。
+        每项返回 rules 与 ruleCount/weightSum；name/direction/effectiveOn 之间为 AND。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfStrategyPage'
+    post:
+      operationId: createStrategy
+      tags: [策略]
+      summary: 创建策略
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：POST /strategies → 200/code 0，strategy 表新增 LB-Strategy-B/version=1）。
+        name + strategyVersion 租户内唯一；rules 省略时使用 8 条默认权重。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StrategyCreateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfStrategy'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /strategies/{id}/clone:
+    post:
+      operationId: cloneStrategy
+      tags: [策略]
+      summary: 克隆策略
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：POST /strategies/{id}/clone → 200/code 0，新增 LB-Strategy-B-CLONE/version=1）。
+        生成新 strategyVersion，规则深拷贝；id 不存在返回 40400。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfStrategy'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /strategies/{id}:
+    get:
+      operationId: getStrategy
+      tags: [策略]
+      summary: 策略详情
+      description: 状态：已实现（2026-11-04 制品级 HTTP 验收：GET /strategies/{id} → 200/code 0，返回含 rules 的策略视图）。域内 `/{id}` 已加正则排除 export/import 保留段（C38）。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfStrategy'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: updateStrategy
+      tags: [策略]
+      summary: 更新策略（全量替换 rules）
+      description: 状态：已实现（2026-11-04 制品级 HTTP 验收：PUT /strategies/{id} → 200/code 0，version 1→2，rules 全量替换）。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StrategyUpdateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfStrategy'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    delete:
+      operationId: deleteStrategy
+      tags: [策略]
+      summary: 删除策略
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：DELETE /strategies/{id} → 200/code 0，strategy.deleted=true，data=null）。
+        逻辑删除；被订单引用时返回 42200。响应 `data` 为 null。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功（data=null）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /strategies/{id}/export:
+    get:
+      operationId: exportStrategy
+      tags: [策略]
+      summary: 导出策略
+      description: |
+        C19 冻结形状为 `data = {strategy, rules, checksum}`，`checksum` 必出现：记录摘要（文件完整性），即 `SHA-256(canonical({strategy, rules}))`，其中 `strategy` 含 `id` 与乐观锁 `version`（hex 64 位）；同一内容从不同记录导出值不同属预期。
+        验收（2026-11-04）：GET /strategies/{id}/export → 200/code 0，`data={strategy,rules,checksum}`，checksum 为 64 位 hex，
+        已按 C19 wrapper 返回（早前“返回扁平载荷、无 checksum”的描述已过时）。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfStrategyExport'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /strategies/import:
+    post:
+      operationId: importStrategy
+      tags: [策略]
+      summary: 导入策略
+      description: |
+        C19 冻结：请求 `{payload, dryRun}`，响应 `{valid, errors[], strategyId, existing}`。先按记录摘要校验文件完整性（缺失/非法/不一致 → 422/42200），再按剔除 id/version 的内容摘要比对（相同 → 200 幂等 existing=true；不同 → 409/40901，禁止自动升版本）。`dryRun=true` 共用同一套判定但不落库。
+        验收（2026-11-04）：POST /strategies/import → 200/code 0，响应 `{valid:true,errors:[],strategyId,existing}`；
+        同一内容回灌返回 `existing=true` 且不新建/不升版本（strategy 表行数不变），`dryRun=true` 不落库（早前“无 dryRun、直接落库”的描述已过时）。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StrategyImportRequest'
+      responses:
+        '200':
+          description: 校验/导入结果（幂等命中返回既有 strategyId 且 existing=true；dryRun=true 时不落库，strategyId 为 null）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfStrategyImport'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /sandboxes:
+    x-milestone: M3
+    get:
+      operationId: listSandboxes
+      tags: [场景]
+      summary: 场景列表
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：GET /sandboxes → 200/code 0，total=2，按 createdAt 倒序）。
+        返回 SandboxSummaryView（不含 snapshot）。
+      x-implementation-status: implemented
+      parameters:
+        - name: type
+          in: query
+          required: false
+          description: 按场景类型过滤；缺省不返回 `ARCHIVED`，`type=ARCHIVED` 显式查询才返回（contract-freeze §25.3.1）
+          schema:
+            $ref: '#/components/schemas/SandboxType'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfSandboxPage'
+    post:
+      operationId: createSandbox
+      tags: [场景]
+      summary: 创建场景
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：POST /sandboxes → 200/code 0，生成 LB-W-COMPARE/LB-W-APPLY，type=WHAT_IF）。
+        WHAT_IF 从 BASELINE 复制快照；BASELINE 每租户唯一。响应为 SandboxSummaryView（不含 snapshot）。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SandboxCreateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfSandbox'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /sandboxes/{id}/apply:
+    x-milestone: M3
+    post:
+      operationId: applySandbox
+      tags: [场景]
+      summary: 应用场景
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：POST /sandboxes/{id}/apply → 200/code 0；LB-W-APPLY→type=BASELINE/version=2，
+        生成 PUBLISHED 计划轮次 taskCount=1，原 BASELINE 变为 ARCHIVED）。把 WHAT_IF 结果发布为主计划（BASELINE）；响应为 SandboxApplyResultView（sandbox + plan）。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfSandboxApply'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /sandboxes/{id}/compare:
+    x-milestone: M3
+    get:
+      operationId: compareSandbox
+      tags: [场景]
+      summary: 场景对比
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：GET /sandboxes/{id}/compare?targetId=… → 200/code 0，
+        addedTaskCount=0/removedTaskCount=4/movedTaskCount=1，truncated=false）。方向固定为 id - targetId；响应 SandboxCompareView。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: targetId
+          in: query
+          required: true
+          description: 对比目标场景 UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfSandboxCompare'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    Size:
+      name: size
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 20
+    Sort:
+      name: sort
+      in: query
+      schema:
+        type: string
+        example: dueDate,asc
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: 幂等键，8-128 位 [A-Za-z0-9._:-]
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+  responses:
+    BadRequest:
+      description: 参数错误（code=40000）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    NotFound:
+      description: 资源不存在（code=40400）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Conflict:
+      description: 状态或幂等冲突（code=40900/40901）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Unprocessable:
+      description: 业务校验失败（code=42200）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    NotImplemented:
+      description: 占位端点未实现（HTTP 501，code=50100）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+  schemas:
+    Result:
+      type: object
+      required: [code, message, traceId]
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          nullable: true
+        traceId:
+          type: string
+    OrderSource:
+      type: string
+      enum: [ERP_SYNC, MANUAL, AGENT]
+    OrderPriority:
+      type: string
+      enum: [URGENT, HIGH, NORMAL, LOW]
+    OrderStatus:
+      type: string
+      enum: [DRAFT, CONFIRMED, SCHEDULED, RELEASED, IN_PROGRESS, COMPLETED, CANCELLED]
+    FreezeStatus:
+      type: string
+      enum: [UNFROZEN, FROZEN, LOCKED_TIME_WINDOW, LOCKED_RESOURCE]
+    Order:
+      type: object
+      properties:
+        orderNo:
+          type: string
+        materialCode:
+          type: string
+          description: 对应 orders.product_id → material.code
+        qty:
+          type: number
+        status:
+          $ref: '#/components/schemas/OrderStatus'
+        freezeStatus:
+          $ref: '#/components/schemas/FreezeStatus'
+        freezeLock:
+          type: object
+          readOnly: true
+          nullable: true
+          description: C23 只读投影，来源 orders.ext_attrs.freezeLock；未冻结/无锁时为 null
+          properties:
+            from:
+              type: string
+              format: date-time
+              nullable: true
+            to:
+              type: string
+              format: date-time
+              nullable: true
+            resourceCodes:
+              type: array
+              items:
+                type: string
+        dueDate:
+          type: string
+          format: date
+        priority:
+          $ref: '#/components/schemas/OrderPriority'
+        source:
+          $ref: '#/components/schemas/OrderSource'
+        customerId:
+          type: string
+          format: uuid
+          nullable: true
+        customerCode:
+          type: string
+          maxLength: 64
+          nullable: true
+          readOnly: true
+          x-contract-id: C50
+          description: |
+            C50 新增只读展示字段。来源 orders.customer_id → customer.code（同一 tenant_id、deleted=false）。
+            customerId 为空、客户不存在或已软删除时为 null；禁止返回“已关联客户”等占位文案。
+          example: CUS-001
+        customerName:
+          type: string
+          maxLength: 256
+          nullable: true
+          readOnly: true
+          x-contract-id: C50
+          description: |
+            C50 新增只读展示字段。来源 orders.customer_id → customer.name（同一 tenant_id、deleted=false）。
+            与 customerCode 成对返回：要么同时有值，要么同时为 null。
+          example: 华北储能客户 A
+        routingId:
+          type: string
+          format: uuid
+          nullable: true
+        remark:
+          type: string
+          nullable: true
+        extAttrs:
+          type: object
+        version:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    OrderCreateRequest:
+      type: object
+      required: [orderNo, materialCode, qty, dueDate]
+      properties:
+        orderNo:
+          type: string
+          maxLength: 64
+        source:
+          $ref: '#/components/schemas/OrderSource'
+        materialCode:
+          type: string
+        qty:
+          type: number
+          exclusiveMinimum: true
+          minimum: 0
+        dueDate:
+          type: string
+          format: date
+        priority:
+          $ref: '#/components/schemas/OrderPriority'
+        customerId:
+          type: string
+          format: uuid
+          nullable: true
+        routingId:
+          type: string
+          format: uuid
+          nullable: true
+        remark:
+          type: string
+        extAttrs:
+          type: object
+    OrderUpdateRequest:
+      type: object
+      required: [version]
+      description: 仅 DRAFT 可改；orderNo 不可修改；未传字段保持原值。
+      properties:
+        materialCode:
+          type: string
+          description: 对应 orders.product_id → material.code；变更时校验物料存在
+        qty:
+          type: number
+          exclusiveMinimum: true
+          minimum: 0
+        dueDate:
+          type: string
+          format: date
+        priority:
+          $ref: '#/components/schemas/OrderPriority'
+        customerId:
+          type: string
+          format: uuid
+          nullable: true
+        routingId:
+          type: string
+          format: uuid
+          nullable: true
+        remark:
+          type: string
+          nullable: true
+        extAttrs:
+          type: object
+        version:
+          type: integer
+          minimum: 1
+          description: 乐观锁版本；必须与当前 orders.version 一致
+    OrderFreezeRequest:
+      type: object
+      required: [freezeStatus, version]
+      properties:
+        freezeStatus:
+          $ref: '#/components/schemas/FreezeStatus'
+        version:
+          type: integer
+          description: 与 orders.version 不一致返回 40901
+        lockFrom:
+          type: string
+          format: date-time
+          nullable: true
+          description: freezeStatus=LOCKED_TIME_WINDOW 时必填；缺失返回 400/40000
+        lockTo:
+          type: string
+          format: date-time
+          nullable: true
+          description: freezeStatus=LOCKED_TIME_WINDOW 时必填，且大于 lockFrom
+        lockedResourceCodes:
+          type: array
+          items:
+            type: string
+          description: freezeStatus=LOCKED_RESOURCE 时必填且非空；服务端按 trim+去重规范化
+    OrderPriorityRequest:
+      type: object
+      required: [priority, version]
+      properties:
+        priority:
+          $ref: '#/components/schemas/OrderPriority'
+        version:
+          type: integer
+    OrderVersionRequest:
+      type: object
+      properties:
+        version:
+          type: integer
+        reason:
+          type: string
+          nullable: true
+    AtpRequest:
+      type: object
+      description: ATP 交期预估请求（C46）；全部字段可空并由服务端统一校验，非法值返回 422/42200
+      required: [materialCode, qty, requestedDate]
+      properties:
+        materialCode:
+          type: string
+          maxLength: 64
+          description: 必填；物料不存在返回 404/40400
+        qty:
+          type: number
+          exclusiveMinimum: true
+          minimum: 0
+          maximum: 1000000000
+          description: 必填，0 < qty <= 1e9
+        requestedDate:
+          type: string
+          format: date
+          description: 必填，交期偏好
+        customerId:
+          type: string
+          format: uuid
+          nullable: true
+          description: 可选；格式非法由 Jackson 返回 400/40000
+        orderNo:
+          type: string
+          maxLength: 64
+          nullable: true
+          description: 可选；存在时必须为 CONFIRMED/SCHEDULED/RELEASED/IN_PROGRESS 且物料一致，否则 422/42200
+        mode:
+          type: string
+          enum: [FAST, ACCURATE]
+          default: FAST
+          description: FAST=构造启发式估算（ESTIMATE）；ACCURATE=Timefold 限时求解
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 30
+          nullable: true
+          description: ACCURATE 可选，缺省取 aps.atp.accurate-timeout-seconds；越界 422/42200
+        allowSplitBatch:
+          type: boolean
+          nullable: true
+          default: false
+          description: 可选；当前实现不拆批，仅作为建议依据
+    AtpBottleneck:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [RESOURCE_QUEUE, CALENDAR_GAP, OPERATION_DURATION, INFEASIBLE_HORIZON, NO_RESOURCE,
+                 CRITICAL_OPERATION, DUE_DATE_MISS, SOLVE_TIMEOUT, INFEASIBLE]
+        resourceCode:
+          type: string
+          nullable: true
+        operationCode:
+          type: string
+          nullable: true
+        operationIndex:
+          type: integer
+          nullable: true
+        delayMinutes:
+          type: integer
+        detail:
+          type: string
+    AtpSuggestion:
+      type: object
+      properties:
+        action:
+          type: string
+          enum: [SHIFT_TO_ALTERNATE_RESOURCE, ADD_OVERTIME, ADD_SHIFT, ADJUST_PROMISED_DATE, SPLIT_BATCH,
+                 LOCK_CAPACITY, MAINTAIN_RESOURCE, EXTEND_TIMEOUT]
+        resourceCode:
+          type: string
+          nullable: true
+        operationCode:
+          type: string
+          nullable: true
+        operationIndex:
+          type: integer
+          nullable: true
+        expectedGainMinutes:
+          type: integer
+        detail:
+          type: string
+    AtpCapacityLockSuggestion:
+      type: object
+      description: 建议性标识，不落主计划（mainPlanWritten 恒为 false）
+      properties:
+        advisoryOnly:
+          type: boolean
+          description: 恒为 true，表示仅为建议
+        required:
+          type: boolean
+        reason:
+          type: string
+        resourceCodes:
+          type: array
+          items:
+            type: string
+        from:
+          type: string
+          format: date-time
+          nullable: true
+        to:
+          type: string
+          format: date-time
+          nullable: true
+    AtpSolveInfo:
+      type: object
+      properties:
+        engine:
+          type: string
+        timeoutSeconds:
+          type: integer
+          nullable: true
+        elapsedMs:
+          type: integer
+        timedOut:
+          type: boolean
+        solverStatus:
+          type: string
+          nullable: true
+        scoreHard:
+          type: number
+          nullable: true
+        scoreSoft:
+          type: number
+          nullable: true
+        assignedTaskCount:
+          type: integer
+        unassignedTaskCount:
+          type: integer
+        message:
+          type: string
+    AtpResult:
+      type: object
+      description: ATP 交期预估响应（C46）；mainPlanWritten 恒为 false，调用不产生任何主计划写入
+      properties:
+        materialCode:
+          type: string
+        qty:
+          type: number
+        requestedDate:
+          type: string
+          format: date
+        orderNo:
+          type: string
+          nullable: true
+        mode:
+          type: string
+          enum: [FAST, ACCURATE]
+        accuracy:
+          type: string
+          enum: [ESTIMATE, VERIFIED, UNVERIFIED]
+          description: FAST 恒为 ESTIMATE；ACCURATE 仅完整可行解为 VERIFIED
+        status:
+          type: string
+          enum: [OK, INFEASIBLE, TIMEOUT, FAILED]
+        feasible:
+          type: boolean
+          nullable: true
+          description: 有日期时为 earliestDeliveryDate <= requestedDate；TIMEOUT 时为 null
+        earliestDeliveryDate:
+          type: string
+          format: date
+          nullable: true
+          description: TIMEOUT/INFEASIBLE 时不返回，禁止伪造
+        earliestDate:
+          type: string
+          format: date
+          nullable: true
+          description: C41 兼容别名，与 earliestDeliveryDate 同值
+        leadTimeDays:
+          type: integer
+          nullable: true
+        bottleneckResourceCode:
+          type: string
+          nullable: true
+          description: C41 兼容；首要瓶颈资源编码
+        bottlenecks:
+          type: array
+          items:
+            $ref: '#/components/schemas/AtpBottleneck'
+        suggestions:
+          type: array
+          items:
+            $ref: '#/components/schemas/AtpSuggestion'
+        capacityLockSuggestion:
+          $ref: '#/components/schemas/AtpCapacityLockSuggestion'
+        solve:
+          $ref: '#/components/schemas/AtpSolveInfo'
+        assumptions:
+          type: array
+          items:
+            type: string
+        mainPlanWritten:
+          type: boolean
+          description: 恒为 false
+        message:
+          type: string
+    CtpRequest:
+      type: object
+      x-contract-id: C53
+      required: [materialCode, qty, requestedDate]
+      properties:
+        materialCode:
+          type: string
+          maxLength: 64
+        qty:
+          type: number
+          exclusiveMinimum: true
+          minimum: 0
+          maximum: 1000000000
+        requestedDate:
+          type: string
+          format: date
+        customerCode:
+          type: string
+          maxLength: 64
+          nullable: true
+          description: 仅用于审计/展示；客户不存在不阻断询单
+        priority:
+          type: string
+          nullable: true
+          enum: [URGENT, HIGH, NORMAL, LOW]
+        allowSplitBatch:
+          type: boolean
+          default: false
+          description: V1 不拆批；true 不改变 promisedQty
+        allowSubstitute:
+          type: boolean
+          default: false
+          description: 与 materialPolicy 合并：任一为替代即生效 SUBSTITUTE
+        materialPolicy:
+          type: string
+          nullable: true
+          default: STRICT
+          enum: [STRICT, SUBSTITUTE]
+        timeoutSeconds:
+          type: integer
+          nullable: true
+          minimum: 1
+          maximum: 15
+          default: 15
+    CtpVerdict:
+      type: string
+      enum: [UNVERIFIED, PROMISED, UNPROMISABLE, OUT_OF_HORIZON, NO_ROUTE, NO_MATERIAL, SOLVER_TIMEOUT, BUSY]
+      description: |
+        只有 PROMISED 带日期；BUSY 走 HTTP 503/50300。
+        UNVERIFIED = 物料侧已判定可齐、但容量未由 ACCURATE 验证（C2 入口态）；
+        此时 promisedDate/promisedQty/capacityVerifiedAt/solver 必须全为 null，不得展示为交期。
+        NO_MATERIAL = 物料数据不足、无法判定（不是缺料结论），与 UNPROMISABLE（已判定缺料/不可行）互斥。
+    CtpSolverSummary:
+      type: object
+      description: ACCURATE 验证过程摘要；solveTaskId 恒为 null（CTP 不建 solve_task）
+      properties:
+        engine:
+          type: string
+        seed:
+          type: integer
+          format: int64
+          nullable: true
+        hardScore:
+          type: number
+          nullable: true
+        softScore:
+          type: number
+          nullable: true
+        durationMs:
+          type: integer
+          format: int64
+        terminationReason:
+          type: string
+          nullable: true
+        solveTaskId:
+          type: integer
+          format: int64
+          nullable: true
+          description: 恒为 null
+    CtpMaterialSummary:
+      type: object
+      description: C53 物料摘要开放对象；C54 不用于物料明细
+      additionalProperties: true
+      properties:
+        bomDepth:
+          type: integer
+          nullable: true
+        shortages:
+          type: array
+          nullable: true
+          items:
+            type: object
+            additionalProperties: true
+            description: 至少含 materialCode/requiredQty/availableQty/shortageQty/expectedArrival
+        substitutes:
+          type: array
+          nullable: true
+          items:
+            type: object
+            additionalProperties: true
+            description: 至少含 materialCode/substituteCode/priority/availableQty
+        assumptions:
+          type: array
+          nullable: true
+          items:
+            type: string
+    CtpResult:
+      type: object
+      x-contract-id: C53
+      description: CTP 询单响应；mainPlanWritten 恒为 false，不写任何主计划
+      properties:
+        inquiryId:
+          type: string
+          format: uuid
+        verdict:
+          $ref: '#/components/schemas/CtpVerdict'
+        promisedDate:
+          type: string
+          format: date
+          nullable: true
+          description: 仅 PROMISED 非空；必须来自求解结果，禁止伪造
+        promisedQty:
+          type: number
+          nullable: true
+          description: 仅 PROMISED 非空；V1 等于请求 qty
+        materialReadyAt:
+          type: string
+          format: date
+          nullable: true
+        capacityVerifiedAt:
+          type: string
+          format: date-time
+          nullable: true
+        horizonEnd:
+          type: string
+          format: date-time
+          nullable: true
+          description: 仅 OUT_OF_HORIZON 非空
+        solver:
+          allOf:
+            - $ref: '#/components/schemas/CtpSolverSummary'
+          nullable: true
+          description: 仅发生 ACCURATE 验证时非空
+        material:
+          allOf:
+            - $ref: '#/components/schemas/CtpMaterialSummary'
+          nullable: true
+        evidence:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            description: 元素 {kind, taskIds, resourceCode, start, end, detail}
+        assumptions:
+          type: array
+          items:
+            type: string
+        message:
+          type: string
+          nullable: true
+        generatedAt:
+          type: string
+          format: date-time
+        mainPlanWritten:
+          type: boolean
+          description: 恒为 false
+    ResultOfCtp:
+      type: object
+      properties:
+        code:
+          type: integer
+        message:
+          type: string
+        data:
+          $ref: '#/components/schemas/CtpResult'
+        traceId:
+          type: string
+    StrategyDirection:
+      type: string
+      enum: [FORWARD, BACKWARD, BOTTLENECK]
+    Strategy:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        direction:
+          $ref: '#/components/schemas/StrategyDirection'
+        strategyVersion:
+          type: integer
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+        initialRules:
+          type: object
+        optimizationRules:
+          type: object
+        applyCondition:
+          type: object
+        version:
+          type: integer
+    StrategyCreateRequest:
+      type: object
+      required: [name, direction, effectiveFrom]
+      properties:
+        name:
+          type: string
+        direction:
+          $ref: '#/components/schemas/StrategyDirection'
+        strategyVersion:
+          type: integer
+          default: 1
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+        initialRules:
+          type: object
+        optimizationRules:
+          type: object
+        applyCondition:
+          type: object
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/StrategyRule'
+        ruleCount:
+          type: integer
+        weightSum:
+          type: number
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    StrategyRule:
+      type: object
+      properties:
+        code:
+          type: string
+        name:
+          type: string
+        phase:
+          type: string
+          enum: [INITIAL, OPTIMIZATION]
+        type:
+          type: string
+          enum: [HARD, SOFT]
+        weight:
+          type: number
+        params:
+          type: object
+        enabled:
+          type: boolean
+        seqNo:
+          type: integer
+    StrategyUpdateRequest:
+      type: object
+      required: [version]
+      properties:
+        version:
+          type: integer
+          description: 乐观锁版本，必填
+        name:
+          type: string
+          maxLength: 128
+        direction:
+          $ref: '#/components/schemas/StrategyDirection'
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+        initialRules:
+          type: object
+        applyCondition:
+          type: object
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/StrategyRule'
+    StrategyExportPayload:
+      type: object
+      description: 实现当前的扁平导出载荷（9 字段、无 checksum）；C19 冻结形状见 StrategyExportPackage。
+      required: [formatVersion, name, direction, strategyVersion]
+      properties:
+        formatVersion:
+          type: string
+          example: '1.0'
+        name:
+          type: string
+        direction:
+          $ref: '#/components/schemas/StrategyDirection'
+        strategyVersion:
+          type: integer
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+        initialRules:
+          type: object
+        applyCondition:
+          type: object
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/StrategyRule'
+    StrategyExportPackage:
+      type: object
+      description: C19 冻结导出形状；checksum 必出现，是记录摘要（文件完整性）：SHA-256(canonical({strategy, rules}))，其中 strategy 含 id 与乐观锁 version。
+      required: [strategy, rules, checksum]
+      properties:
+        strategy:
+          $ref: '#/components/schemas/StrategyExportPayload'
+          description: 策略头与规则集（实现当前为扁平载荷；补齐时按 C19 拆出 rules）
+        rules:
+          type: array
+          items:
+            $ref: '#/components/schemas/StrategyRule'
+        checksum:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          description: 记录摘要（文件完整性），SHA-256(canonical({strategy, rules}))，strategy 含 id 与乐观锁 version；仅用于回灌前判断文件是否被改动，同一内容从不同记录导出值不同属预期，不得作为内容同一性判据
+    ResultOfStrategyExport:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/StrategyExportPackage'
+    StrategyImportRequest:
+      type: object
+      required: [payload]
+      properties:
+        payload:
+          $ref: '#/components/schemas/StrategyExportPayload'
+        dryRun:
+          type: boolean
+          default: false
+          description: true 只做校验、不落库
+    StrategyImportIssue:
+      type: object
+      properties:
+        code:
+          type: string
+        field:
+          type: string
+        message:
+          type: string
+    StrategyImportResult:
+      type: object
+      required: [valid]
+      properties:
+        valid:
+          type: boolean
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/StrategyImportIssue'
+        strategyId:
+          type: string
+          format: uuid
+          nullable: true
+          description: dryRun=false 时给出（新建成功返回新 id，幂等命中返回既有 id）；dryRun=true 时为 null
+        existing:
+          type: boolean
+          default: false
+          description: 为 true 仅表示本次没有新建、没有升版本、没有写 rules（幂等命中既有记录）；缺省 false，不能用 strategyId 相同与否替代
+    ResultOfStrategyImport:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/StrategyImportResult'
+    SandboxType:
+      type: string
+      enum: [BASELINE, WHAT_IF, ARCHIVED]
+    Sandbox:
+      type: object
+      description: 场景摘要（SandboxSummaryView）；不含 snapshot，字段取自 aps-service/.../service/sandbox/SandboxSummaryView.java
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/SandboxType'
+        parentSandboxId:
+          type: string
+          format: uuid
+          nullable: true
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        version:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+    SandboxApplyResult:
+      type: object
+      description: 场景应用结果（SandboxApplyResultView）；plan 为 C24 PlanActionView，形状定义在 gantt.yaml
+      properties:
+        sandbox:
+          $ref: '#/components/schemas/Sandbox'
+        plan:
+          type: object
+          description: PlanActionView（本文件不展开字段）
+    SandboxCreateRequest:
+      type: object
+      description: '`type` 可选，缺省 `WHAT_IF`；只允许 `WHAT_IF`，传 `BASELINE`/`ARCHIVED` → 422/42200（contract-freeze §25.3.1）'
+      required: [name]
+      properties:
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/SandboxType'
+        parentSandboxId:
+          type: string
+          format: uuid
+          nullable: true
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        snapshot:
+          type: object
+    SandboxCompare:
+      type: object
+      properties:
+        sandboxId:
+          type: string
+          format: uuid
+        targetId:
+          type: string
+          format: uuid
+        dueDateDeltaMinutes:
+          type: integer
+        utilizationDelta:
+          type: number
+        setupCountDelta:
+          type: integer
+        addedTaskCount:
+          type: integer
+        removedTaskCount:
+          type: integer
+        movedTaskCount:
+          type: integer
+        truncated:
+          type: boolean
+          description: 明细是否被截断；计数字段始终为全量
+        changedTasks:
+          type: array
+          description: 变更明细，最多 200 条
+          items:
+            type: object
+            properties:
+              taskId:
+                type: integer
+                format: int64
+              orderNo:
+                type: string
+              resourceCode:
+                type: string
+              changeType:
+                type: string
+                enum: [ADDED, REMOVED, MOVED]
+    ResultOfOrder:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/Order'
+    ResultOfOrderPage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Order'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer
+    ResultOfAtp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/AtpResult'
+    ResultOfStrategy:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/Strategy'
+    ResultOfStrategyPage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Strategy'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer
+    ResultOfSandbox:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/Sandbox'
+    ResultOfSandboxApply:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/SandboxApplyResult'
+    ResultOfSandboxPage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Sandbox'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer
+    ResultOfSandboxCompare:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/SandboxCompare'

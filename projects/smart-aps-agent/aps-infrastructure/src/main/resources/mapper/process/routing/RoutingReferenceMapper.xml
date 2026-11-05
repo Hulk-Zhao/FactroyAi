@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.hengce.aps.infrastructure.persistence.mapper.process.routing.RoutingReferenceMapper">
+
+    <select id="selectExistingResourceIds" resultType="java.util.UUID">
+        SELECT id
+        FROM resource
+        WHERE deleted = false
+          AND id IN
+        <foreach item="id" collection="ids" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
+    <select id="selectExistingTemplateIds" resultType="java.util.UUID">
+        SELECT id
+        FROM operation_template
+        WHERE deleted = false
+          AND id IN
+        <foreach item="id" collection="ids" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
+    <select id="selectResourceCodes"
+            resultType="com.hengce.aps.infrastructure.persistence.process.routing.ResourceCodeRow">
+        SELECT id, code
+        FROM resource
+        WHERE deleted = false
+          AND id IN
+        <foreach item="id" collection="ids" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
+    <select id="selectProductIdByCode" resultType="java.util.UUID">
+        SELECT id
+        FROM material
+        WHERE code = #{code}
+          AND deleted = false
+        LIMIT 1
+    </select>
+
+    <select id="countOrderReferences" resultType="long">
+        SELECT COUNT(1)
+        FROM orders
+        WHERE routing_id = #{routingId}
+          AND deleted = false
+    </select>
+
+    <select id="countTaskReferences" resultType="long">
+        SELECT COUNT(1)
+        FROM task t
+        JOIN orders o ON o.id = t.order_id
+        WHERE o.routing_id = #{routingId}
+          AND t.deleted = false
+          AND o.deleted = false
+    </select>
+</mapper>

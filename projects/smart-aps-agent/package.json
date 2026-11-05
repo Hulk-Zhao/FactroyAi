@@ -1,0 +1,14 @@
+{
+  "name": "mfg-aps-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "衡策 APS 开源版仓库级提交规范工具",
+  "scripts": {
+    "commitlint": "commitlint --edit",
+    "commitlint:range": "commitlint --from HEAD~1 --to HEAD"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4"
+  }
+}

@@ -1,0 +1,56 @@
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+dependency-reduced-pom.xml
+.mvn/wrapper/maven-wrapper.jar
+
+# 前端
+node_modules/
+dist/
+dist.new/
+dist-ssr/
+.vite/
+*.local
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+nbproject/
+*.swp
+*.swo
+
+# 操作系统 / 工具
+.DS_Store
+Thumbs.db
+*.log
+logs/
+tmp/
+
+# 环境变量（仅提交模板 .env.example）
+.env
+
+# 本地临时产物
+.screenshots/
+.scratch/
+
+# Maven 诊断产物（effective-pom dump）
+/aps-service/aps-service-effective-pom
+/aps-service/aps-service-effective-pom.xml
+
+# 运行期取证产物（classpath dump 等）
+/aps-admin/cp.txt
+
+# 离线部署包（scripts/stack-bundle.ps1 生成，体积含镜像 tar）
+dist-offline/

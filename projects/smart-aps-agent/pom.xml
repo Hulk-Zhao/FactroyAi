@@ -1,0 +1,286 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.13</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.hengce.aps</groupId>
+    <artifactId>mfg-aps-platform</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+
+    <name>mfg-aps-platform</name>
+    <description>衡策 APS 开源版：面向离散制造的智能排产平台</description>
+
+    <modules>
+        <module>aps-common</module>
+        <module>aps-agent</module>
+        <module>aps-domain</module>
+        <module>aps-infrastructure</module>
+        <module>aps-solver</module>
+        <module>aps-service</module>
+        <module>aps-web</module>
+        <module>aps-admin</module>
+    </modules>
+
+    <properties>
+        <java.version>21</java.version>
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <!--
+          M3-QA-03 加固：仅覆盖 Spring Boot 父 POM 管理的两个版本族属性，
+          其余 Boot 依赖保持 3.3.13 原线不动。
+          tomcat.version 由 spring-boot-dependencies 用于 tomcat-embed-* 全部构件。
+          注：10.1.58 在 Maven Central 未发布（10.1.57 之后直接是 10.1.59），
+          故取同分支最近的 10.1.59。
+        -->
+        <tomcat.version>10.1.59</tomcat.version>
+        <!-- jackson-bom.version 由 spring-boot-dependencies 导入 jackson-bom 时使用 -->
+        <jackson-bom.version>2.18.11</jackson-bom.version>
+
+        <timefold.version>2.8.0</timefold.version>
+        <ortools.version>9.15.6755</ortools.version>
+        <!-- PostgreSQL JDBC 最新稳定版 -->
+        <postgresql.version>42.7.14</postgresql.version>
+        <!--
+          Flyway 13.x 与 Spring Boot 3.3 的 FlywayAutoConfiguration 不在官方适配线内，
+          这里选用 10.x 线最新稳定版，保证 dev profile 可正常迁移。
+        -->
+        <flyway.version>10.22.0</flyway.version>
+        <checkstyle.version>14.4.0</checkstyle.version>
+        <maven-checkstyle-plugin.version>3.6.0</maven-checkstyle-plugin.version>
+        <maven-pmd-plugin.version>3.28.0</maven-pmd-plugin.version>
+        <pmd.version>7.17.0</pmd.version>
+        <!-- SpringDoc 2.6.x 为 Spring Boot 3.3 官方兼容线；不跟随最新版以免与 Boot 3.3 不兼容 -->
+        <springdoc.version>2.6.0</springdoc.version>
+        <!-- 结构化 JSON 日志编码器；8.x 对应 Logback 1.5（Spring Boot 3.3 内置版本） -->
+        <logstash-logback-encoder.version>8.0</logstash-logback-encoder.version>
+        <!-- 与父 POM（spring-boot-starter-parent）保持一致；用于显式锁定 Boot starter 版本 -->
+        <spring-boot.version>3.3.13</spring-boot.version>
+        <!--
+          M1 预置：MyBatis-Plus 3.5.9 是 3.3 线最后一个官方对齐版本（按 Spring Boot 3.3.4 构建）；
+          3.5.10+ 已转向 Boot 3.4/3.5，不跟随。
+        -->
+        <mybatis-plus.version>3.5.9</mybatis-plus.version>
+        <!-- Testcontainers 1.x 最新线；2.x 为破坏性大版本，M1 不跟随 -->
+        <testcontainers.version>1.21.4</testcontainers.version>
+        <!-- M2 Excel 导入导出（W9 使用）；Spring Boot 不管理 POI 版本，根 POM 统一锁定 -->
+        <poi.version>5.3.0</poi.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>ai.timefold.solver</groupId>
+                <artifactId>timefold-solver-bom</artifactId>
+                <version>${timefold.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- M1 预置：Testcontainers BOM（含 junit-jupiter / postgresql 模块版本） -->
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-bom</artifactId>
+                <version>${testcontainers.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- M1 预置：持久化（仅版本管理，各模块按需引用） -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+            <!-- 3.5.9 起分页插件所需 JSqlParser 独立模块 -->
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-jsqlparser</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+
+            <!-- Spring Boot 已管理；这里显式锁定，避免子模块漂移 -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-actuator</artifactId>
+                <version>${spring-boot.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-validation</artifactId>
+                <version>${spring-boot.version}</version>
+            </dependency>
+            <!-- M2 C20：STOMP over WebSocket 进度推送（W3 使用） -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-websocket</artifactId>
+                <version>${spring-boot.version}</version>
+            </dependency>
+            <!-- M2 异步求解/限流多实例演进（W3 使用） -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-data-redis</artifactId>
+                <version>${spring-boot.version}</version>
+            </dependency>
+            <!-- M2 C26：Excel 导入导出（W9 使用） -->
+            <dependency>
+                <groupId>org.apache.poi</groupId>
+                <artifactId>poi-ooxml</artifactId>
+                <version>${poi.version}</version>
+            </dependency>
+
+            <!-- PostgreSQL JDBC 驱动；版本沿用既有 postgresql.version -->
+            <dependency>
+                <groupId>org.postgresql</groupId>
+                <artifactId>postgresql</artifactId>
+                <version>${postgresql.version}</version>
+            </dependency>
+
+            <!-- 内部模块统一版本 -->
+            <dependency>
+                <groupId>com.hengce.aps</groupId>
+                <artifactId>aps-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.hengce.aps</groupId>
+                <artifactId>aps-agent</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.hengce.aps</groupId>
+                <artifactId>aps-domain</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.hengce.aps</groupId>
+                <artifactId>aps-infrastructure</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.hengce.aps</groupId>
+                <artifactId>solver-api</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.hengce.aps</groupId>
+                <artifactId>solver-dsl</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.hengce.aps</groupId>
+                <artifactId>solver-timefold</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.hengce.aps</groupId>
+                <artifactId>solver-ortools</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.hengce.aps</groupId>
+                <artifactId>aps-service</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.hengce.aps</groupId>
+                <artifactId>aps-web</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-checkstyle-plugin</artifactId>
+                    <version>${maven-checkstyle-plugin.version}</version>
+                    <dependencies>
+                        <dependency>
+                            <groupId>com.puppycrawl.tools</groupId>
+                            <artifactId>checkstyle</artifactId>
+                            <version>${checkstyle.version}</version>
+                        </dependency>
+                    </dependencies>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-pmd-plugin</artifactId>
+                    <version>${maven-pmd-plugin.version}</version>
+                    <dependencies>
+                        <dependency>
+                            <groupId>net.sourceforge.pmd</groupId>
+                            <artifactId>pmd-java</artifactId>
+                            <version>${pmd.version}</version>
+                        </dependency>
+                    </dependencies>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <release>${maven.compiler.release}</release>
+                    <parameters>true</parameters>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-checkstyle-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>checkstyle-check</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <configLocation>${maven.multiModuleProjectDirectory}/config/checkstyle/checkstyle.xml</configLocation>
+                            <consoleOutput>true</consoleOutput>
+                            <failOnViolation>true</failOnViolation>
+                            <violationSeverity>warning</violationSeverity>
+                            <includeTestSourceDirectory>false</includeTestSourceDirectory>
+                            <cacheFile>${project.build.directory}/checkstyle-cachefile</cacheFile>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-pmd-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>pmd-check</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <configuration>
+                            <rulesets>
+                                <ruleset>${maven.multiModuleProjectDirectory}/config/pmd/pmd-ruleset.xml</ruleset>
+                            </rulesets>
+                            <failOnViolation>true</failOnViolation>
+                            <printFailingErrors>true</printFailingErrors>
+                            <includeTests>false</includeTests>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

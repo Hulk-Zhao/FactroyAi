@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.hengce.aps.infrastructure.persistence.mapper.calendar.CalendarMapper">
+
+    <resultMap id="CalendarResultMap" type="com.hengce.aps.infrastructure.persistence.calendar.Calendar">
+        <id column="id" property="id" typeHandler="org.apache.ibatis.type.ObjectTypeHandler"/>
+        <result column="tenant_id" property="tenantId" typeHandler="org.apache.ibatis.type.ObjectTypeHandler"/>
+        <result column="name" property="name"/>
+        <result column="type" property="type"/>
+        <result column="resource_id" property="resourceId"
+                typeHandler="org.apache.ibatis.type.ObjectTypeHandler"/>
+        <result column="resource_group_id" property="resourceGroupId"
+                typeHandler="org.apache.ibatis.type.ObjectTypeHandler"/>
+        <result column="effective_from" property="effectiveFrom"/>
+        <result column="effective_to" property="effectiveTo"/>
+        <result column="shifts" property="shifts"
+                typeHandler="com.hengce.aps.infrastructure.persistence.handler.JsonbTypeHandler"/>
+        <result column="holidays" property="holidays"
+                typeHandler="com.hengce.aps.infrastructure.persistence.handler.JsonbTypeHandler"/>
+        <result column="calendar_version" property="calendarVersion"/>
+        <result column="version" property="version"/>
+        <result column="deleted" property="deleted"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="updated_at" property="updatedAt"/>
+        <result column="created_by" property="createdBy" typeHandler="org.apache.ibatis.type.ObjectTypeHandler"/>
+        <result column="updated_by" property="updatedBy" typeHandler="org.apache.ibatis.type.ObjectTypeHandler"/>
+    </resultMap>
+
+    <sql id="CalendarColumns">
+        id, tenant_id, name, type, resource_id, resource_group_id,
+        effective_from, effective_to, shifts, holidays, calendar_version,
+        version, deleted, created_at, updated_at, created_by, updated_by
+    </sql>
+
+    <select id="findById" resultMap="CalendarResultMap">
+        SELECT <include refid="CalendarColumns"/>
+        FROM calendar
+        WHERE id = #{id,typeHandler=org.apache.ibatis.type.ObjectTypeHandler}
+          AND deleted = false
+    </select>
+
+    <select id="selectPage" resultMap="CalendarResultMap">
+        SELECT <include refid="CalendarColumns"/>
+        FROM calendar
+        WHERE deleted = false
+        <if test="name != null and name != ''">
+            AND name ILIKE CONCAT('%', #{name}, '%')
+        </if>
+        <if test="type != null and type != ''">
+            AND type = #{type}
+        </if>
+        <if test="resourceId != null">
+            AND resource_id = #{resourceId,typeHandler=org.apache.ibatis.type.ObjectTypeHandler}
+        </if>
+        <if test="resourceGroupId != null">
+            AND resource_group_id = #{resourceGroupId,typeHandler=org.apache.ibatis.type.ObjectTypeHandler}
+        </if>
+        ORDER BY effective_from DESC, name ASC
+    </select>
+
+    <select id="maxCalendarVersion" resultType="int">
+        SELECT COALESCE(MAX(calendar_version), 0)
+        FROM calendar
+        WHERE deleted = false
+          AND name = #{name}
+    </select>
+
+    <select id="countByNameAndVersion" resultType="long">
+        SELECT COUNT(*)
+        FROM calendar
+        WHERE deleted = false
+          AND name = #{name}
+          AND calendar_version = #{calendarVersion}
+        <if test="excludeId != null">
+            AND id &lt;&gt; #{excludeId,typeHandler=org.apache.ibatis.type.ObjectTypeHandler}
+        </if>
+    </select>
+
+    <select id="countResourceReferences" resultType="long">
+        SELECT COUNT(*)
+        FROM resource
+        WHERE deleted = false
+          AND calendar_id = #{calendarId,typeHandler=org.apache.ibatis.type.ObjectTypeHandler}
+    </select>
+
+    <select id="countResourceGroupReferences" resultType="long">
+        SELECT COUNT(*)
+        FROM resource_group
+        WHERE deleted = false
+          AND calendar_id = #{calendarId,typeHandler=org.apache.ibatis.type.ObjectTypeHandler}
+    </select>
+
+    <insert id="insert" parameterType="com.hengce.aps.infrastructure.persistence.calendar.Calendar">
+        INSERT INTO calendar (
+            id, tenant_id, name, type, resource_id, resource_group_id,
+            effective_from, effective_to, shifts, holidays, calendar_version,
+            version, deleted, created_at, updated_at, created_by, updated_by
+        )
+        VALUES (
+            #{id,typeHandler=org.apache.ibatis.type.ObjectTypeHandler},
+            #{tenantId,typeHandler=org.apache.ibatis.type.ObjectTypeHandler},
+            #{name}, #{type},
+            #{resourceId,typeHandler=org.apache.ibatis.type.ObjectTypeHandler},
+            #{resourceGroupId,typeHandler=org.apache.ibatis.type.ObjectTypeHandler},
+            #{effectiveFrom}, #{effectiveTo},
+            #{shifts,typeHandler=com.hengce.aps.infrastructure.persistence.handler.JsonbTypeHandler},
+            #{holidays,typeHandler=com.hengce.aps.infrastructure.persistence.handler.JsonbTypeHandler},
+            #{calendarVersion}, #{version}, #{deleted}, #{createdAt}, #{updatedAt},
+            #{createdBy,typeHandler=org.apache.ibatis.type.ObjectTypeHandler},
+            #{updatedBy,typeHandler=org.apache.ibatis.type.ObjectTypeHandler}
+        )
+    </insert>
+
+    <update id="update" parameterType="com.hengce.aps.infrastructure.persistence.calendar.Calendar">
+        UPDATE calendar
+        SET name = #{name},
+            type = #{type},
+            resource_id = #{resourceId,typeHandler=org.apache.ibatis.type.ObjectTypeHandler},
+            resource_group_id = #{resourceGroupId,typeHandler=org.apache.ibatis.type.ObjectTypeHandler},
+            effective_from = #{effectiveFrom},
+            effective_to = #{effectiveTo},
+            shifts = #{shifts,typeHandler=com.hengce.aps.infrastructure.persistence.handler.JsonbTypeHandler},
+            holidays = #{holidays,typeHandler=com.hengce.aps.infrastructure.persistence.handler.JsonbTypeHandler},
+            version = version + 1,
+            updated_at = #{updatedAt},
+            updated_by = #{updatedBy,typeHandler=org.apache.ibatis.type.ObjectTypeHandler}
+        WHERE id = #{id,typeHandler=org.apache.ibatis.type.ObjectTypeHandler}
+          AND version = #{version}
+          AND deleted = false
+    </update>
+
+    <update id="logicDelete">
+        UPDATE calendar
+        SET deleted = true,
+            version = version + 1,
+            updated_at = #{updatedAt},
+            updated_by = #{updatedBy,typeHandler=org.apache.ibatis.type.ObjectTypeHandler}
+        WHERE id = #{id,typeHandler=org.apache.ibatis.type.ObjectTypeHandler}
+          AND version = #{version}
+          AND deleted = false
+    </update>
+
+</mapper>

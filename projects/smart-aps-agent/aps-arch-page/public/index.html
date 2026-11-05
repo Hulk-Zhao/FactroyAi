@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>衡策 APS 开源版 · 落地架构设计与任务拆解</title>
+<link rel="icon" href="data:," />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <div>
+      <div class="brand-title">mfg-aps-platform（衡策 APS 开源版）</div>
+      <div class="brand-sub">落地架构详细设计 · 分阶段协同开发任务拆解 &nbsp;|&nbsp; 基于 PRD v1.0-draft，严格对齐 MVP（v0.1）范围 &nbsp;|&nbsp; 进度更新于 2026-11-04</div>
+    </div>
+    <div class="nav">
+      <button id="nav-arch" class="active" onclick="switchView('arch')">第一部分 · 架构设计</button>
+      <button id="nav-task" onclick="switchView('task')">第二部分 · 任务拆解</button>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+
+<!-- ===================== PART 1 ===================== -->
+<div id="view-arch" class="layout">
+  <nav class="toc">
+    <h4>第一部分 · 架构设计</h4>
+    <a href="#s-status">执行进展（2026-11-04）</a>
+    <a href="#s1">1. 分层架构与模块边界</a>
+    <a class="sub" href="#s1-solver">1.1 SolverAdapter 解耦</a>
+    <a class="sub" href="#s1-agent">1.2 Agent 交互协议</a>
+    <a href="#s2">2. 技术栈落地方案</a>
+    <a href="#s3">3. 核心流程时序设计</a>
+    <a href="#s4">4. 数据库设计指引</a>
+    <a href="#s5">5. 部署架构细化</a>
+    <a href="#s6">6. 架构风险与应对</a>
+    <a href="#s7">7. 给项目负责人的建议</a>
+  </nav>
+
+  <div class="content">
+
+  <section class="doc" id="s0">
+    <h2>设计总纲</h2>
+    <p class="lead">本方案在 PRD 第 2 章架构基础上做<strong>可直接指导开发的细化</strong>，贯穿三条原则：<strong>解耦</strong>（业务层不感知具体求解器）、<strong>可扩展</strong>（引擎/Agent/行业模板可插拔）、<strong>开源友好</strong>（Apache-2.0、模块边界清晰、无隐性商业依赖）。所有设计<strong>严格限定在 MVP（v0.1）范围</strong>：以 Timefold 单引擎 + 基础约束 DSL 为核心，Agent 能力仅做接口与数据预留，不提前实现。</p>
+    <div class="callout tip">
+      <span class="ct">MVP 架构定位（务实、不过度设计）</span>
+      MVP 交付的实质是「<strong>开箱即用、中文原生、带约束 DSL 与 Justification 的 Timefold APS</strong>」。双引擎中的 Agent 引擎（异常重排 / NL→DSL / what-if / mfg-agent 对接）按 PRD 明确推迟到 v0.5，MVP 仅保留 <code class="inl">SolverAdapter</code> 抽象、事件总线消息契约、<code class="inl">ConstraintJustification</code> 持久化三个「扩展锚点」，为 v0.5 铺路而不实现。
+    </div>
+  </section>
+
+  <section class="doc" id="s-status">
+    <h2>执行进展（截至 2026-11-04）</h2>
+    <p class="lead">本节只记录有提交/实测证据的进展；无证据项标「待确认」，不写推测。</p>
+
+    <table class="t">
+      <thead><tr><th>阶段</th><th>状态</th><th>证据与结论</th></tr></thead>
+      <tbody>
+        <tr><td><strong>M1 最小闭环</strong></td><td>已完成</td><td>看板 M1 任务全部完成，最小排产闭环（数据 → 求解 → 甘特）已可演示</td></tr>
+        <tr><td><strong>M2 策略与调整</strong></td><td><strong>已收口</strong></td><td>提交 <code class="inl">e006679</code>：① 求解「假成功」消灭（<code class="inl">usable = unassignedTaskCount==0 &amp;&amp; score.isFeasible()</code>）；② 落库前整表重叠守卫（<code class="inl">FAILED/FAILED</code>、<code class="inl">degraded=false</code>、无 <code class="inl">engineFallback*</code>）；③ <code class="inl">metrics</code> 内 null 原样输出；④ 策略导入双摘要（记录摘要 vs 内容摘要）与 <code class="inl">existing</code> 幂等</td></tr>
+        <tr><td><strong>M3 系统管理与验收</strong></td><td>进行中（第一波已交付）</td><td>C30 RBAC/审计（真库门禁 <code class="inl">335/0/0/0</code>、<code class="inl">Skipped=0</code>、<code class="inl">Started in 6.3s</code>）、C36 SPLIT/MERGE、C32 Sandbox + C33 下发（迁移 <code class="inl">V11__notification_outbox.sql</code>）、C34 采购建议；契约 <strong>C30–C41 已冻结</strong>于 <code class="inl">contract-freeze.md §25</code></td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <span class="ct">M2 演示与容量边界（实测口径）</span>
+      ① <strong>8 单 48 任务</strong>、<strong>50 单 300 任务</strong> 在 60s 内 <code class="inl">SOLVED</code>，且 48/48、300/300 全量落库；<br />
+      ② <strong>50 单 5s</strong> → <code class="inl">TIMEOUT</code>、<code class="inl">persistedTaskCount=0</code>，库内既有行不变（验证「失败不污染」）；<br />
+      ③ <strong>200 / 300 / 500 单</strong>在 60s 与 300s 均 <code class="inl">TIMEOUT</code>（500 单 60s 实排 0 个任务）；<br />
+      ④ 结论：<strong>≤50 单 / 300 任务可在 60s 内可解</strong>；多线程（Timefold 企业版）不在 M2/M3 范围。
+    </div>
+
+    <div class="callout">
+      <span class="ct">M3 第二波与未开工项</span>
+      <strong>在跑</strong>：W2 策略与择优（C35）、W3 求解重试与 PARTIAL（C37）。<br />
+      <strong>未开工</strong>：W7/W8（前端页面流）、W9 残余（C38 / C39 与迁移 V12）。<br />
+      <strong>迁移状态</strong>：V1–V7 已应用，V11 新增；<strong>V8 / V9 / V10 / V13 为空号</strong>（V1 已含相关表）。
+    </div>
+
+    <div class="callout">
+      <span class="ct">技术基线（已落地）</span>
+      Spring Boot <strong>3.3.13</strong> + Java <strong>21</strong>；多模块 Maven（<code class="inl">aps-common / domain / infrastructure / solver(api/dsl/timefold/ortools) / service / web / admin</code>）；PostgreSQL <strong>15</strong> + Flyway；Timefold <strong>2.8.0 社区版</strong>（<strong>无多线程</strong>）；前端 Vue 3 + TypeScript + Vite + Element Plus，已完成设计令牌化（<code class="inl">--primary #3B8AE8</code>、<code class="inl">--bg #0A1322</code> 等）与 ≥1440 / 1024–1439 / &lt;1024 三档响应式。
+    </div>
+
+    <p class="lead"><strong>指标口径变化</strong>：<code class="inl">metrics</code> 不再输出 <code class="inl">stepCount</code> / <code class="inl">unimprovedStepCount</code>——Timefold 2.8 的 <code class="inl">SolverJob</code> 不提供该计数，恒 0 属失真，前端改用 elapsedMs + 收敛曲线。</p>
+  </section>
+
+  <section class="doc" id="s1">
+    <h2>1. 分层架构与模块边界</h2>
+    <p>后端采用 PRD 2.6 的多模块划分，明确<strong>依赖方向单向向下、领域不依赖框架</strong>（依赖倒置）。核心约束：<code class="inl">aps-service</code> 与 <code class="inl">aps-web</code> 只能依赖 <code class="inl">solver-api</code> 抽象，<strong>严禁</strong>出现 Timefold / OR-Tools 的类型泄漏。</p>
+
+    <table class="t">
+      <thead><tr><th>模块</th><th>职责边界</th><th>可依赖</th><th>不可依赖</th></tr></thead>
+      <tbody>
+        <tr><td><strong>aps-common</strong></td><td>Result 封装、错误码、BizException、工具类、常量、traceId</td><td>无（最底层）</td><td>任何业务模块</td></tr>
+        <tr><td><strong>aps-domain</strong></td><td>领域模型（Entity/VO/DTO）、Repository 接口、领域服务、<strong>求解中立 DTO</strong>（ScheduleProblem 等）</td><td>aps-common</td><td>infrastructure / solver 实现 / 框架细节</td></tr>
+        <tr><td><strong>aps-infrastructure</strong></td><td>持久化实现（MyBatis-Plus Mapper）、Redis、MQ、MinIO、外部集成，实现 domain 的 Repository 接口</td><td>domain, common</td><td>service, web</td></tr>
+        <tr><td><strong>aps-solver</strong></td><td><code class="inl">solver-api</code>（SolverAdapter 抽象）/ <code class="inl">solver-timefold</code>（实现）/ <code class="inl">solver-dsl</code>（DSL 编译）/ <code class="inl">solver-ortools</code>（预留空壳）</td><td>domain, common</td><td>service, web, infrastructure</td></tr>
+        <tr><td><strong>aps-service</strong></td><td>业务编排：基础数据、订单、策略、MRP、甘特图数据、Sandbox、求解任务编排</td><td>domain, solver-api, infrastructure</td><td>web, solver 具体实现</td></tr>
+        <tr><td><strong>aps-web</strong></td><td>Controller / REST / 全局异常 / 参数校验 / Swagger</td><td>service, common</td><td>infrastructure 细节, solver 实现</td></tr>
+        <tr><td><strong>aps-agent</strong>（MVP 仅骨架）</td><td>agent-core（编排/Prompt 预留）、agent-tools（Tool 定义预留）、agent-mcp（对接预留）</td><td>domain, solver-api, service（经接口）</td><td>—（v0.5 落地）</td></tr>
+        <tr><td><strong>aps-admin</strong></td><td>启动入口、配置装配、Bean 编排</td><td>全部</td><td>—</td></tr>
+      </tbody>
+    </table>
+
+    <pre class="diagram">依赖方向（单向向下，领域为核心）
+
+  aps-web ──▶ aps-service ──▶ ┌─ aps-domain（Entity/DTO/Repository 接口/求解中立模型）
+                  │           ├─ solver-api（SolverAdapter 抽象接口）
+                  │           └─ aps-infrastructure（Repository 实现/Redis/MQ/MinIO）
+                  ▼
+        solver-timefold / solver-dsl  ── implements ──▶ solver-api
+        （Timefold 类型只存在于 solver-timefold 内部）
+
+  所有模块 ──▶ aps-common（Result/异常/工具）</pre>
+
+    <h3 id="s1-solver">1.1 算法引擎层与业务层的解耦设计（重点）</h3>
+    <p>业务层通过统一 <code class="inl">SolverAdapter</code> 接口调用求解，<strong>同步用于 ATP 快速预估、异步用于主排产</strong>。接口与 DTO 全部落在 <code class="inl">solver-api</code>，保持<strong>引擎中立</strong>（不含任何 Timefold 注解/类型）。</p>
+
+    <h4>SolverAdapter 统一接口方法定义</h4>
+    <pre class="code">public interface SolverAdapter {
+
+    EngineType engineType();                       // TIMEFOLD / ORTOOLS / RULE_BASED
+
+    // 同步求解：用于 ATP FAST 预估（&lt;1~2s），阻塞返回
+    ScheduleSolution solve(ScheduleProblem problem, SolveConfig config);
+
+    // 异步求解：用于主排产。返回句柄，任务状态入 DB+Redis，进度经 WebSocket 推送
+    SolveHandle submitAsync(ScheduleProblem problem, SolveConfig config);
+
+    // 提前终止（对应 Timefold SolverJob.terminateEarly()）
+    boolean terminateEarly(String solveTaskId);
+
+    // 进度查询：当前得分 / 收敛曲线（Timefold 2.8 SolverJob 不提供步数计数）
+    SolveProgress getProgress(String solveTaskId);
+
+    // 增量重排：以上次解为起点，仅重排未冻结任务
+    ScheduleSolution solveIncremental(ScheduleProblem problem,
+                                      ScheduleSolution startingSolution,
+                                      SolveConfig config);
+}</pre>
+
+    <h4>入参 / 出参数据结构（引擎中立 DTO）</h4>
+    <table class="t">
+      <thead><tr><th>结构</th><th>关键字段</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><strong>ScheduleProblem</strong>（入参）</td><td>orders、resources、routings、calendars、setupMatrix、strategy、frozenAssignments、sandboxId</td><td>由「问题装配器」从 DB 组装；对应 Timefold 的 <code class="inl">@PlanningSolution</code>，但注解只在 solver-timefold 内的包装类上</td></tr>
+        <tr><td><strong>TaskAssignment</strong></td><td>taskId、orderId、operationIndex、resourceId、secondaryResourceIds、startTime、endTime、setupStart/End、sequenceInResource、pinned(冻结)</td><td>Timefold 的 <code class="inl">@PlanningEntity</code>；资源以 <strong>List Variable</strong> 持有任务序列</td></tr>
+        <tr><td><strong>SolveConfig</strong></td><td>terminationSeconds(默认60)、moveThreadCount、acceptorType(默认 LATE_ACCEPTANCE)、mode(FAST/ACCURATE)、idempotencyKey</td><td>求解配置，运行时可调；<strong>Timefold 2.8.0 社区版不支持多线程求解</strong>，<code class="inl">moveThreadCount</code> 仅企业版可用，MVP 不启用</td></tr>
+        <tr><td><strong>ScheduleSolution</strong>（出参）</td><td>scoreHard、scoreSoft、assignments[]、justifications[]、metrics、status(SOLVED/TIMEOUT/INFEASIBLE)</td><td>回写 task 表 + constraint_justification 表</td></tr>
+        <tr><td><strong>SolveMetrics</strong></td><td>elapsedMs、收敛曲线采样、bestScoreHistory</td><td>前端进度与性能分析；<strong>不再输出 stepCount / unimprovedStepCount</strong>（Timefold 2.8 的 <code class="inl">SolverJob</code> 无该计数，恒 0 属失真）</td></tr>
+        <tr><td><strong>ConstraintJustification(DTO)</strong></td><td>constraintId、constraintName、scoreImpact、implicatedFacts(taskId/resourceId/orderId)</td><td><strong>MVP 必须持久化</strong>，为 v0.5 中文归因（FR-AG-003）预留数据</td></tr>
+      </tbody>
+    </table>
+
+    <h4>同步 / 异步调用方式</h4>
+    <ul>
+      <li><strong>异步（主排产）</strong>：<code class="inl">submitAsync</code> 基于 Timefold <code class="inl">SolverManager</code> 提交 <code class="inl">SolverJob</code>，任务状态机 <code class="inl">PENDING→RUNNING→SOLVED/FAILED/CANCELLED/TIMEOUT</code> 落 PostgreSQL，进度写 Redis，经 WebSocket 推前端。同一 Sandbox 同时仅一个 RUNNING（可配置排队/拒绝）。服务重启后以 DB 为准恢复或标记失败。</li>
+      <li><strong>同步（ATP FAST）</strong>：MVP 属 Should Have；接口保留 <code class="inl">solve()</code> 走构造启发式（First Fit），P95&lt;2s，不落主计划仅在 Sandbox 计算。</li>
+    </ul>
+
+    <h3 id="s1-agent">1.2 Agent 层与业务层的交互协议（MVP 预留，v0.5 落地）</h3>
+    <p>MVP <strong>不实现</strong> Agent 业务能力，但需固化三类「契约锚点」，避免 v0.5 返工：</p>
+    <ol>
+      <li><strong>事件总线消息格式</strong>（Redis Stream，MVP 仅用于订单状态/求解完成事件；异常事件通道预留）：
+        <pre class="code">{
+  "eventId": "EVT-20261103-001",
+  "eventType": "SCHEDULE_SOLVED | ORDER_CONFIRMED | EQUIPMENT_FAILURE(预留)",
+  "source": "APS | MES | mfg-agent | MANUAL | SYSTEM",
+  "tenantId": "...",
+  "timestamp": "2026-11-03T10:00:00Z",
+  "traceId": "...",
+  "payload": { /* 事件详情，如 solveTaskId / resourceId / affectedTasks */ }
+}</pre>
+      </li>
+      <li><strong>Tool 接口定义</strong>（MVP 定义 Schema，不实现调用）：<code class="inl">aps.schedule(orders, strategy)</code>、<code class="inl">aps.atp(product, qty)</code>、<code class="inl">aps.explain(taskId)</code>、<code class="inl">aps.whatIf(scenario)</code>。Tool 内部一律回调 <code class="inl">aps-service</code> 的公开接口，不直连 DB / solver。</li>
+      <li><strong>与 mfg-agent-platform 对接规范</strong>：APS 暴露 <code class="inl">/api/v1/integration/agent/*</code> 系列端点，采用标准 REST + Webhook，<strong>不强依赖特定 Agent 框架</strong>；MCP/A2A 注册与 gRPC 直连为 v0.5 事项。降级要求：对方平台不可用时 APS 独立运行不受影响。</li>
+    </ol>
+    <div class="callout">
+      <span class="ct">解耦红线</span>
+      Agent 只能通过 <strong>Tool → service 接口</strong>访问能力；Agent 生成的约束 DSL <strong>必须经沙箱验证 + 人工审核</strong>才能进入生产求解（PRD BR-SE-005-05 / BR-AG-002-04）。MVP 阶段该链路仅保留数据与接口占位。
+    </div>
+  </section>
+
+  <section class="doc" id="s2">
+    <h2>2. 技术栈落地方案</h2>
+
+    <h3>2.1 后端</h3>
+    <ul>
+      <li><strong>框架版本</strong>：Spring Boot <strong>3.3.x</strong> + Java <strong>21 LTS</strong> + Maven（Timefold 1.35+ 要求 JDK 21）。</li>
+      <li><strong>持久层选型：MyBatis-Plus（推荐）</strong>。理由：① 甘特图/齐套/审计等<strong>复杂报表与多表关联查询</strong>需要精细 SQL 控制；② PostgreSQL <strong>JSONB 扩展属性</strong>（ext_attrs / industry_attrs）用自定义 TypeHandler 处理更自然；③ 契合阿里 Java 规范与国内团队心智；④ 求解领域对象是<strong>独立 POJO</strong>（非 ORM 实体），用装配器在 DB 模型与 ScheduleProblem 间转换，避免 JPA 懒加载与求解器对象图冲突。<em>JPA 更适合纯 CRUD，本项目查询形态偏复杂，故选 MyBatis-Plus。</em></li>
+      <li><strong>异常处理</strong>：全局 <code class="inl">@RestControllerAdvice</code>；业务异常 <code class="inl">BizException(errorCode, args)</code>；校验异常统一转字段级错误；HTTP 语义码对齐 PRD（409 冲突 / 422 业务不可处理 / 400 参数 / 403 权限 / 429 限流）。</li>
+      <li><strong>统一返回封装</strong>：
+        <pre class="code">{ "code": 0, "message": "success", "data": {...}, "traceId": "xxx" }</pre>
+        错误码：<code class="inl">0</code> 成功、<code class="inl">4xxxx</code> 客户端、<code class="inl">5xxxx</code> 服务端；写操作支持 <code class="inl">Idempotency-Key</code>；分页 <code class="inl">page/size/sort</code>（size 默认 20、最大 200）；默认限流 100 req/min/user。</li>
+    </ul>
+
+    <h3>2.2 前端</h3>
+    <ul>
+      <li><strong>技术栈</strong>：Vue 3.4+ + TypeScript + Vite + Element Plus + Pinia + Vue Router + Axios（统一拦截 Result/错误码/traceId）。</li>
+      <li><strong>甘特图 MVP 最终选型（对齐 PRD 2.2）</strong>：MVP 采用开源 <strong>vue-ganttastic</strong> 承载资源/订单甘特图基础渲染，<strong>拖拽与实时可行性校验用自研交互层补齐</strong>（同/跨资源拖拽、工序依赖/日历/换型前端预校验、冲突高亮、负载热力）。<strong>不引入商业 Bryntum（GA 再评估）</strong>。
+        <div class="callout risk"><span class="ct">兜底策略</span>M1 必须完成甘特图 PoC（任务 <strong>M1-FE-06</strong>，关键路径）。若 vue-ganttastic 在<strong>大数据量（5000 任务）虚拟滚动</strong>或<strong>拖拽性能</strong>不达标，则切换到<strong>基于 ECharts custom series 自研</strong>甘特图层，接口契约不变。前端只暴露统一的 <code class="inl">GanttAdapter</code>，隔离底层库。</div>
+      </li>
+      <li>工艺路线 DAG 编辑器与甘特图共享图形交互基建；大数据量场景统一采用虚拟滚动 + 分页加载。</li>
+    </ul>
+
+    <h3>2.3 中间件</h3>
+    <ul>
+      <li><strong>PostgreSQL 15+</strong>：见第 4 节表设计规范。启用 <code class="inl">pgcrypto</code>（gen_random_uuid）、<code class="inl">pg_trgm</code>（名称模糊查询）。</li>
+      <li><strong>Redis 7 使用场景清单</strong>：① 分布式锁（Redisson，求解任务/发布互斥）；② 求解进度缓存与收敛曲线；③ 幂等键（Idempotency-Key）短期存储；④ JWT 刷新/黑名单；⑤ 系统配置缓存（发布订阅热更新）；⑥ <strong>Redis Stream 作为 MVP 事件总线</strong>。</li>
+      <li><strong>消息队列选型确认</strong>：<strong>MVP 用 Redis Stream</strong>（契合「轻量部署 ≤4C8G、单机 Docker Compose」目标，避免多一个 RabbitMQ 容器与运维）。RabbitMQ / Kafka 推迟到 GA（多副本、跨系统高吞吐场景）。</li>
+      <li><strong>MinIO</strong>：附件（图纸、贴片程序、钢网照片），MVP 端口内部化不对外暴露。</li>
+    </ul>
+
+    <h3>2.4 Timefold Solver 集成方式（重点）</h3>
+    <table class="t">
+      <thead><tr><th>维度</th><th>内嵌式（同 JVM，<strong>MVP 推荐</strong>）</th><th>独立求解微服务（GA 演进）</th></tr></thead>
+      <tbody>
+        <tr><td>集成方式</td><td>timefold-solver-spring-boot-starter，SolverManager 本地提交</td><td>独立进程/容器，gRPC/REST 调用</td></tr>
+        <tr><td>优点</td><td>零网络序列化开销、部署最简、契合 4C8G 单机</td><td>求解与业务隔离、可独立水平扩展、OOM 不影响主服务</td></tr>
+        <tr><td>缺点</td><td>求解吃 CPU/内存与业务同进程；大规模分区受限</td><td>需序列化 Problem/Solution、运维复杂度上升</td></tr>
+        <tr><td>适用</td><td>MVP：≤500 工单/50 资源，单引擎</td><td>GA：≥500 工单分区搜索、CP-SAT 并存、多副本</td></tr>
+      </tbody>
+    </table>
+    <p><strong>推荐路线</strong>：MVP <strong>内嵌式</strong>（aps-admin 同 JVM 加载 solver-timefold）。因已用 <code class="inl">SolverAdapter</code> 抽象隔离，GA 阶段将 solver-timefold 抽为独立服务时，<strong>业务层零改动</strong>，仅替换 Adapter 实现为远程调用即可。OOM 风险 MVP 内通过「降级分批求解（按产品线拆分）+ 单线程限时求解」规避；社区版无多线程，不使用 <code class="inl">moveThreadCount</code>。</p>
+  </section>
+
+  <section class="doc" id="s3">
+    <h2>3. 核心流程时序设计</h2>
+
+    <h3>3.1 主排产全流程时序（订单提交 → 求解 → 甘特图渲染）</h3>
+    <pre class="diagram">用户/ERP   Web        Service      MRP        SolverAdapter   Timefold(内嵌)   Redis/DB      WebSocket
+   │        │            │           │              │               │             │             │
+   │─提交订单─▶│           │           │              │               │             │             │
+   │        │─创建/确认──▶│           │              │               │             │             │
+   │        │            │─齐套分析──▶│              │               │             │             │
+   │        │            │◀─缺料明细─│              │               │             │             │
+   │        │            │  (缺料→补料建议/非阻塞标记；齐套→进排产池)               │             │
+   │        │            │─策略匹配（初排+8规则权重+方向）                          │             │
+   │        │            │─submitAsync(problem,cfg)─▶│              │             │             │
+   │        │            │              │  装配 ScheduleProblem      │             │             │
+   │        │            │              │──solve job───────────────▶│             │             │
+   │        │            │◀─SolveHandle(taskId)──────│              │             │             │
+   │        │◀─202 受理──│            │              │  元启发式迭代 │             │             │
+   │        │            │              │              │  写进度────────────────▶│             │
+   │        │            │              │              │              │  进度推送──────────────▶│──▶前端实时曲线
+   │        │            │              │              │◀─Solution+Justification─│             │
+   │        │            │◀─回调：解回写 task / constraint_justification─────────▶│             │
+   │        │            │─发布事件 SCHEDULE_SOLVED → 事件总线(Redis Stream)──────▶│             │
+   │        │◀─求解完成（WS）──────────────────────────────────────────────────────────────────│
+   │─拉取甘特图数据(/gantt/resource|order)─▶│  （&lt;3s 渲染）                                     │
+   │◀─任务列表+资源+策略──────────────────│                                                        │</pre>
+    <p><strong>关键 SLA（对齐 PRD 3.1 / 5.1）</strong>：齐套分析 &lt;5s（100 订单）；Timefold 求解 &lt;60s（500 工单/50 资源，超时可配）；求解→甘特图渲染 &lt;3s；发布→MES 下发 &lt;10s（异步 Webhook，MVP 预留下发通道）。</p>
+
+    <h3>3.2 人工调整 + 增量重排时序（甘特图拖拽）</h3>
+    <pre class="diagram">计划员    前端甘特图      Web/Service     SolverAdapter    Timefold     DB
+  │           │               │               │             │          │
+  │─拖拽任务──▶│               │               │             │          │
+  │           │─本地实时校验（工序依赖/资源冲突/日历/换型）              │
+  │           │  ├─不可行→高亮冲突+原因，回滚，不请求后端                │
+  │           │  └─可行→乐观锁(version)+调整记录，POST /tasks/{id}/adjust
+  │           │───────────────▶│              │             │          │
+  │           │               │─权限校验 SCHEDULE_ADJUST                │
+  │           │               │─写入调整(undo栈≤50)，生成新版本计划─────▶│
+  │           │               │─(可选)增量重排 solveIncremental(冻结已开工/锁定项)
+  │           │               │───────────────▶│─startingSolution────▶│
+  │           │               │               │◀─仅重排受影响任务─────│
+  │           │               │◀─回写受影响 task（冻结任务不移动）──────▶│
+  │           │◀─更新视图（受影响任务）+ 新版本号（可回滚）              │
+  │◀─展示变更高亮                                                      │</pre>
+    <p><strong>要点</strong>：① 已开工任务（IN_PROGRESS）只能 FREEZE，不能 MOVE/SPLIT；② 增量重排默认关闭、可开启，仅调整受影响任务而非全量求解；③ 并发用乐观锁 + 版本号，冲突返回并要求刷新；④ 每次调整生成新版本计划，支持回滚（对齐 FR-GT-004 / FR-GT-005）。</p>
+  </section>
+
+  <section class="doc" id="s4">
+    <h2>4. 数据库设计指引</h2>
+
+    <h3>4.1 MVP 必须的 10 张核心表</h3>
+    <table class="t">
+      <thead><tr><th>#</th><th>表名</th><th>用途</th><th>关键约束</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td><strong>material</strong></td><td>物料主数据 + 行业属性</td><td>UNIQUE(tenant_id, code) WHERE deleted=false</td></tr>
+        <tr><td>2</td><td><strong>bom</strong>（+ bom_item）</td><td>多级 BOM、版本、拼板</td><td>UNIQUE(parent_material_id, version)；同父件仅一个 ACTIVE</td></tr>
+        <tr><td>3</td><td><strong>resource</strong></td><td>主/辅资源、产能、资源组、维护</td><td>UNIQUE(tenant_id, code)；capacity_mode 与 value 匹配</td></tr>
+        <tr><td>4</td><td><strong>calendar</strong></td><td>班次/节假日/可用工时</td><td>历史日历不可改；生效期不冲突</td></tr>
+        <tr><td>5</td><td><strong>operation_template</strong></td><td>可复用工序模版</td><td>版本管理，被 routing 引用</td></tr>
+        <tr><td>6</td><td><strong>routing</strong>（+ node/edge）</td><td>工艺路线 DAG</td><td>UNIQUE(product_id, version)；无环</td></tr>
+        <tr><td>7</td><td><strong>orders</strong></td><td>销售/生产订单</td><td>UNIQUE(tenant_id, order_no)；状态机 + freeze_status</td></tr>
+        <tr><td>8</td><td><strong>task</strong></td><td>排产任务（求解结果）</td><td>强外键 order_id；sandbox_id 隔离场景</td></tr>
+        <tr><td>9</td><td><strong>strategy</strong>（+ rule）</td><td>排产策略、初排/优化规则权重</td><td>版本 + 生效期 + 适用条件</td></tr>
+        <tr><td>10</td><td><strong>solve_task</strong></td><td>求解任务生命周期</td><td>idempotency_key 幂等；状态机</td></tr>
+      </tbody>
+    </table>
+    <p><strong>配套表（次核心，MVP 亦需）</strong>：<code class="inl">constraint_justification</code>（归因数据预留）、<code class="inl">sandbox</code>（场景）、<code class="inl">audit_log</code>（审计）、<code class="inl">users/role/permission</code>（RBAC）、<code class="inl">task_adjustment</code>（调整历史/撤销栈）。</p>
+
+    <h3>4.2 主键、软删除、JSONB 规范</h3>
+    <ul>
+      <li><strong>主键策略</strong>：业务主数据用 <code class="inl">UUID</code>（<code class="inl">gen_random_uuid()</code>，租户安全、分布式友好）；<strong>高频大表</strong>（task / audit_log / solve_task）用 <code class="inl">BIGSERIAL</code> 或雪花 ID（索引更紧凑、写入更友好）。对外一律另设<strong>业务编码</strong>（code / order_no）供人类可读与唯一校验。</li>
+      <li><strong>软删除规范</strong>：统一 <code class="inl">deleted BOOLEAN DEFAULT false</code>；所有查询经 MyBatis-Plus 逻辑删除拦截自动过滤；唯一约束带 <code class="inl">WHERE deleted=false</code> 部分索引；删除前做引用校验（PRD BR-MD-001-07 等），被引用则拒绝或转软删除并标记。</li>
+      <li><strong>通用字段</strong>：<code class="inl">tenant_id</code>（MVP 单租户默认值，字段与过滤拦截器预留）、<code class="inl">version</code>（乐观锁）、<code class="inl">created_at/updated_at/created_by/updated_by</code>。</li>
+      <li><strong>JSONB 使用规范</strong>：仅存放<strong>扩展属性（ext_attrs）与行业属性（industry_attrs）</strong>及快照/明细（bom.items、routing.nodes/edges、strategy.rules、payload、snapshot）。<strong>凡参与排产计算或高频过滤的字段必须结构化成列</strong>（如 capacity_mode、due_date、priority、start_time），不得塞进 JSONB。JSONB 建 <strong>GIN 索引</strong>；约定每个 JSONB 字段的内部 schema 并在开发者文档固化，避免"无 schema 膨胀"。</li>
+    </ul>
+
+    <h3>4.3 关键索引与查询性能要点（对齐 PRD 8.3）</h3>
+    <ul>
+      <li><code class="inl">task(sandbox_id, resource_id, start_time)</code> —— 资源甘特图时间轴查询（覆盖索引，避免回表）。</li>
+      <li><code class="inl">task(order_id, operation_index)</code> —— 订单工序链查询。</li>
+      <li><code class="inl">orders(tenant_id, status, due_date)</code> —— 订单池按状态+交期检索。</li>
+      <li><code class="inl">solve_task(sandbox_id, status, created_at)</code> —— 求解任务列表与并发控制。</li>
+      <li><code class="inl">audit_log(tenant_id, created_at DESC, action)</code> —— 审计按时间倒序分页。</li>
+      <li>JSONB GIN：<code class="inl">ext_attrs / industry_attrs / payload</code>。</li>
+      <li><strong>性能要点</strong>：甘特图按<strong>时间范围 + 资源分页</strong>查询而非全表；单表控制在千万行内、超量走分区（按时间/租户，PRD 三期）；报表类查询用只读副本（GA 读写分离）；BOM 多级展开用<strong>递归 CTE</strong> 并限深（≤20 级）+ 环检测。</li>
+    </ul>
+  </section>
+
+  <section class="doc" id="s5">
+    <h2>5. 部署架构细化</h2>
+
+    <h3>5.1 Docker Compose 服务清单与端口规划</h3>
+    <table class="t">
+      <thead><tr><th>服务</th><th>镜像/构建</th><th>容器端口</th><th>宿主映射</th><th>数据卷</th></tr></thead>
+      <tbody>
+        <tr><td>aps-frontend</td><td>Nginx 托管 Vue 构建产物</td><td>80</td><td><strong>80</strong>（入口）</td><td>—</td></tr>
+        <tr><td>aps-backend</td><td>Spring Boot（内嵌 Timefold）</td><td>8080</td><td>8080（或仅内网）</td><td>logs</td></tr>
+        <tr><td>postgres</td><td>postgres:15</td><td>5432</td><td>内网（不对外）</td><td>pgdata</td></tr>
+        <tr><td>redis</td><td>redis:7</td><td>6379</td><td>内网</td><td>redisdata</td></tr>
+        <tr><td>minio</td><td>minio/minio</td><td>9000/9001</td><td>内网（9010/9011 可选调试）</td><td>miniodata</td></tr>
+        <tr><td>aps-agent</td><td>可选独立容器</td><td>8090</td><td>内网</td><td>—（MVP 可不起）</td></tr>
+        <tr><td>prometheus / grafana</td><td>可选监控</td><td>9090/3000</td><td>内网/按需</td><td>promdata</td></tr>
+      </tbody>
+    </table>
+    <ul>
+      <li><strong>网络</strong>：单一 bridge 网络 <code class="inl">aps-net</code>；仅 <strong>aps-frontend 80</strong> 对外，backend/db/redis/minio 全部内网，前端 Nginx 反向代理 <code class="inl">/api → aps-backend:8080</code>。</li>
+      <li><strong>数据卷</strong>：pgdata / redisdata / miniodata 命名卷持久化；配置经 <code class="inl">.env</code> 注入，敏感项（DB 密码、LLM Key）AES-256 加密存储。</li>
+      <li><strong>依赖顺序</strong>：<code class="inl">depends_on</code> + healthcheck（postgres/redis 就绪后再起 backend）。</li>
+    </ul>
+
+    <h3>5.2 4C8G 规格调优建议（小型：&lt;100 工单/日）</h3>
+    <table class="t">
+      <thead><tr><th>组件</th><th>参数</th><th>建议值</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td rowspan="3">JVM（backend）</td><td>堆</td><td><code class="inl">-Xms2g -Xmx3g</code></td><td>留 ≥1G 给堆外/求解临时对象与 OS</td></tr>
+        <tr><td>GC</td><td><code class="inl">-XX:+UseG1GC -XX:MaxGCPauseMillis=200</code></td><td>求解为 CPU+内存密集，G1 平衡吞吐与停顿</td></tr>
+        <tr><td>OOM 保护</td><td><code class="inl">-XX:+HeapDumpOnOutOfMemoryError</code></td><td>触发降级分批求解前留证据</td></tr>
+        <tr><td rowspan="2">Timefold</td><td>moveThreadCount</td><td><strong>不启用</strong></td><td>2.8.0 社区版无多线程求解能力；多线程仅企业版，不在 MVP / M2 / M3 范围</td></tr>
+        <tr><td>termination</td><td>限时 60s / bestScoreImproved 稳定即停</td><td>避免长尾占用；超时返回当前最优 + TIMEOUT</td></tr>
+        <tr><td rowspan="3">PostgreSQL</td><td>shared_buffers</td><td>1GB</td><td>约内存 12~25%</td></tr>
+        <tr><td>work_mem / effective_cache_size</td><td>16MB / 3GB</td><td>排序与递归 CTE 友好</td></tr>
+        <tr><td>max_connections</td><td>100（配 PgBouncer 更佳）</td><td>配合后端连接池 HikariCP maxPoolSize≈20</td></tr>
+        <tr><td>Redis</td><td>maxmemory</td><td>512MB + allkeys-lru</td><td>进度/缓存类数据，可淘汰</td></tr>
+      </tbody>
+    </table>
+    <p class="lead">中/大型（8C16G、16C32G）按 PRD 2.5 资源基线等比放大：堆增至 6~12G、启用分区搜索与只读副本。多线程求解依赖 Timefold 企业版，社区版不启用。</p>
+  </section>
+
+  <section class="doc" id="s6">
+    <h2>6. 架构风险与应对（Top 5）</h2>
+
+    <div class="callout risk">
+      <span class="ct">R1 · Timefold 求解性能不达标（500 工单 &lt;60s）</span>
+      <strong>影响</strong>：核心 SLA 失守。<strong>MVP 规避</strong>：① 构造启发式用 First Fit/GoodFirstFit 提供高质量初始解；② 社区版单线程求解，不依赖 <code class="inl">moveThreadCount</code>，改用「限时 + bestScoreImproved 稳定」双条件 termination；③ 大规模走<strong>分区/分层求解</strong>（按产品线/车间拆分）；④ 增量重排复用 startingSolution；⑤ <strong>M2 起即用种子客户真实数据压测</strong>（任务 M2-QA-01），而非上线前才验证。已实测：≤50 单 / 300 任务可解，200/300/500 单超时（见「执行进展」）。
+    </div>
+
+    <div class="callout risk">
+      <span class="ct">R2 · 甘特图交互与大数据量渲染</span>
+      <strong>影响</strong>：拖拽卡顿、5000 任务渲染超 3s。<strong>MVP 规避</strong>：① M1 前置 PoC（M1-FE-06，关键路径），尽早暴露 vue-ganttastic 能力边界；② 统一 <code class="inl">GanttAdapter</code> 抽象，保留 ECharts 自研兜底；③ 虚拟滚动 + 按时间/资源分页；④ 拖拽<strong>前端本地预校验</strong>（工序依赖/日历/换型）+ 后端二次校验，减少无效请求。
+    </div>
+
+    <div class="callout risk">
+      <span class="ct">R3 · 约束 DSL 代码生成安全（JavaPoet 热加载字节码）</span>
+      <strong>影响</strong>：恶意/错误代码注入、热加载导致求解崩溃。<strong>MVP 规避</strong>：① <strong>MVP 收敛 DSL 能力</strong>——仅支持「8 种内置规则的参数化 + 权重 + 条件过滤」，<strong>不开放任意 Constraint Stream 自由编写</strong>；② 生成代码走<strong>白名单 API + 沙箱校验</strong>（语法/类型/字段引用编译期拦截）；③ 热加载<strong>失败自动回滚</strong>上一版本；④ Agent 生成 DSL 强制人工审核（v0.5 才接入 LLM 生成）。
+    </div>
+
+    <div class="callout risk">
+      <span class="ct">R4 · 双引擎抽象不当导致返工 / 过度设计</span>
+      <strong>影响</strong>：为未落地的 CP-SAT 过度设计，拖慢 MVP。<strong>MVP 规避</strong>：① <code class="inl">SolverAdapter</code> 以 <strong>Timefold 真实需求</strong>为准设计，但 DTO 保持引擎中立；② <code class="inl">solver-ortools</code> 仅留<strong>空壳接口 + 配置开关</strong>，不实现（对齐 PRD Won't Have）；③ 引擎路由 MVP 仅 Timefold 单路由 + 规则引擎兜底，CP-SAT 路由规则预留不启用。
+    </div>
+
+    <div class="callout risk">
+      <span class="ct">R5 · 行业特性（SMT 拼板/换型、储能分选）与数据模型耦合、JSONB 膨胀</span>
+      <strong>影响</strong>：模型僵化、查询劣化、行业扩展困难。<strong>MVP 规避</strong>：① 行业专属字段进 <code class="inl">industry_attrs</code> JSONB，<strong>核心排产字段结构化建列</strong>；② 行业能力以<strong>模板 + 配置</strong>扩展（工序模版/换型矩阵/约束规则），不改核心代码；③ 换型矩阵 MVP 可先用<strong>默认值</strong>（Should Have），完整实现放 v0.5（V05-08）；④ 每个 JSONB 字段固化内部 schema 并加 GIN 索引。
+    </div>
+  </section>
+
+  <section class="doc" id="s7">
+    <h2>7. 给项目负责人的 3 条架构落地核心建议</h2>
+    <div class="callout tip">
+      <span class="ct">建议一 · 守住「单引擎 MVP」的边界，把双引擎做成锚点而非负担</span>
+      MVP 的最大风险不是技术，而是<strong>范围蔓延</strong>——被"双引擎/Agent"卖点诱导提前实现 LLM 能力。应严格锁定 MVP = Timefold 单引擎 + 基础 DSL + 甘特图闭环，仅用 <code class="inl">SolverAdapter</code> 抽象、事件总线消息契约、<code class="inl">ConstraintJustification</code> 持久化三个<strong>低成本锚点</strong>为 v0.5 铺路。凡是 PRD 标注 Won't Have 的（CP-SAT / NL→DSL / 异常感知 / mfg-agent 对接），MVP 一律不做。
+    </div>
+    <div class="callout tip">
+      <span class="ct">建议二 · 把两个"高危前置项"放到 M1 就做技术验证，别拖到联调</span>
+      <strong>甘特图选型（M1-FE-06）</strong>与 <strong>Timefold 建模+性能（M1-SE-02/03、M2-QA-01）</strong>是全项目成败关键路径。要求 M1 内完成甘特图 PoC 与 Timefold 最小闭环求解，并<strong>尽早引入种子客户真实数据</strong>做规模压测。性能与交互问题越晚发现，返工成本越高——这两项一旦在 M1 验证通过，M2/M3 就是确定性工程。
+    </div>
+    <div class="callout tip">
+      <span class="ct">建议三 · 用「模块依赖红线 + API 契约先行」保障多人并行不互相阻塞</span>
+      第 0 周必须冻结 <strong>API 契约（P0-08）</strong>与<strong>模块依赖方向（P0-01）</strong>，并写入 CI 门禁（Checkstyle/ArchUnit 校验分层依赖、禁止 solver 实现类型泄漏到 service/web）。四个角色组（基础数据/排产引擎/前端/测试部署）据此并行开发，前端用 Mock 与契约解耦后端进度。开源友好性也由此保证：清晰边界 + 契约文档 = 社区贡献者低门槛上手。
+    </div>
+  </section>
+
+  </div>
+</div>
+
+<!-- ===================== PART 2 ===================== -->
+<div id="view-task" class="hidden">
+  <div class="content" style="max-width:1180px;margin:0 auto;">
+
+    <section class="doc">
+      <h2>第二部分 · 分阶段协同开发任务节点拆解</h2>
+      <p class="lead">以 MVP（v0.1，3 个月）为核心，按<strong>四个角色组</strong>（后端基础数据组 / 后端排产引擎组 / 前端组 / 测试部署组，另含架构/全体）拆解，支持多人并行。下方<strong>交互式任务看板</strong>可按里程碑/角色筛选、高亮关键路径，并可<strong>更新任务状态与负责人（持久化到数据库）</strong>。</p>
+
+      <h3>2.1 项目筹备期（第 0 周）要点</h3>
+      <p>筹备期目标是「<strong>让四个角色组第二天就能并行开工</strong>」。8 个任务（P0-01~08）覆盖脚手架、代码规范、Git 分支、CI/CD、数据库初始化脚本、开发环境统一、统一返回/异常骨架、API 契约。其中 <strong>P0-01 脚手架</strong>、<strong>P0-05 DB 初始化</strong>、<strong>P0-07 通用骨架</strong>、<strong>P0-08 API 契约</strong>为关键路径前置项，必须最先冻结。详见看板「第0周」分组。</p>
+
+      <h3>2.2 里程碑目标与关键路径</h3>
+      <table class="t">
+        <thead><tr><th>里程碑</th><th>目标（对齐 PRD 7.1）</th><th>交付物</th><th>当前状态</th></tr></thead>
+        <tbody>
+          <tr><td><strong>M1（第1月）</strong></td><td>基础数据 + 工艺路线 + 订单 + Timefold 集成，跑通「手工数据→求解→甘特图」<strong>最小闭环</strong></td><td>可演示的最小排产闭环 + 甘特图 PoC 结论</td><td><strong>已完成</strong></td></tr>
+          <tr><td><strong>M2（第2月）</strong></td><td>排产策略 + 人工调整 + 计划发布 + MRP 齐套 + REST API + Docker 部署</td><td>完整主排产流程 + 性能压测达标</td><td><strong>已收口</strong>（<code class="inl">e006679</code>）</td></tr>
+          <tr><td><strong>M3（第3月）</strong></td><td>Sandbox + 审计日志 + RBAC + 性能优化 + 文档 + 种子客户试用 + 缺陷修复</td><td>可交付 MVP + 验收报告 + 全套文档</td><td><strong>进行中</strong>（第一波已交付，第二波在跑）</td></tr>
+        </tbody>
+      </table>
+      <div class="callout">
+        <span class="ct">项目关键路径（串行依赖，红色高亮于看板）</span>
+        <code class="inl">P0-01 → P0-05/P0-07/P0-08 → M1-BD-01 → M1-SE-01 → M1-SE-02 → M1-SE-03 → M1-SE-04 → M1-SE-06（最小闭环）→ M2-SE-01 → M2-SE-03 → M2-FE-01（资源甘特图）→ M2-FE-03（人工调整）→ M3-FE-04（性能优化）→ INT-01（端到端联调）→ INT-03（MVP 验收）</code>
+        <br />关键路径上的任务<strong>不可并行压缩</strong>，是排期与人力投放的优先保障对象；其余任务（标 <span class="pill par">可并行</span>）可在同里程碑内跨角色组并行推进。
+      </div>
+
+      <h3>2.3 核心模块细粒度拆分（颗粒度 1–3 人天）</h3>
+      <p>看板中每条任务已细化到 <strong>1–6 人天</strong>可执行颗粒度，四大核心模块的拆分思路如下（具体节点见看板对应分组）：</p>
+      <ul>
+        <li><strong>基础数据模块（物料/BOM/资源/日历）</strong>：先做「领域模型与持久层基建（M1-BD-01）」打底，再按实体拆为物料、BOM（含环检测）、资源、日历、工序模版、工艺路线 6 条并行接口任务，导入导出抽出通用组件（M2-BD-05）复用。</li>
+        <li><strong>Timefold 适配与求解封装</strong>：拆为「SolverAdapter 中立接口（M1-SE-01）→ 规划建模（M1-SE-02）→ 硬约束（M1-SE-03）→ 装配/回写（M1-SE-04）」串行主线，再叠加「策略与软约束（M2-SE-01）→ DSL 生成（M2-SE-02）→ 异步任务生命周期（M2-SE-03）→ 增量重排（M2-SE-04）→ Justification 持久化（M2-SE-05）→ 路由降级（M2-SE-06）」。</li>
+        <li><strong>甘特图可视化与人工调整</strong>：PoC 选型（M1-FE-06）→ 资源甘特图（M2-FE-01）→ 订单甘特图（M2-FE-02）→ 人工调整含撤销重做（M2-FE-03）→ 进度实时展示（M2-FE-05）→ 性能优化虚拟滚动（M3-FE-04）。</li>
+        <li><strong>排产策略与 MRP 齐套</strong>：策略初排+8规则权重（M2-SE-01）、策略配置页面（M2-FE-04）、齐套分析（M2-BD-01）、齐套结果页面（M2-FE-06）、订单优先级与冻结（M2-BD-02）。</li>
+      </ul>
+
+      <h3>2.4 联调与验收阶段</h3>
+      <p>联调验收贯穿 M2 末至 M3：前后端<strong>主排产全流程联调（M2-QA-02）</strong>→ 集成/E2E（M3-QA-01）→ 非功能性能验收（M3-QA-02）→ 安全扫描（M3-QA-03）→ 种子客户真实数据验证（M3-QA-04）→ 文档输出（M3-QA-05），最终由 <strong>INT-01 端到端联调、INT-02 部署验证、INT-03 MVP 验收核对</strong>收口，逐条对齐 PRD 6.4 七项验收标准（Must Have 100%、Should Have ≥70%、无 P0/P1）。</p>
+      <p class="lead"><strong>实际状态（2026-11-04）</strong>：M2-QA-01（性能压测）与 M2-QA-02（主流程联调）已随 M2 收口完成，实测数据见「执行进展」；M3-QA-01~05 与 INT-01~03 <strong>尚未开始</strong>（W9 残余排期中）。</p>
+
+      <h3>2.5 v0.5 版本任务预告与优先级建议</h3>
+      <table class="t">
+        <thead><tr><th>优先级</th><th>任务</th><th>理由</th></tr></thead>
+        <tbody>
+          <tr><td><strong>P0（高）</strong></td><td>V05-01 Agent 框架 · V05-02 重排归因 · V05-03 NL→DSL · V05-04 异常感知</td><td>差异化核心卖点；归因（V05-02）依赖 MVP 已持久化的 Justification，可最快见效，建议 v0.5 首批</td></tr>
+          <tr><td><strong>P1（中）</strong></td><td>V05-06 ERP 连接器 · V05-07 Webhook · V05-08 换型矩阵 · V05-09 ATP</td><td>集成与行业核心约束，直接影响客户可用性；换型矩阵是 SMT 排产精度关键</td></tr>
+          <tr><td><strong>P2（低）</strong></td><td>V05-05 what-if · V05-10 储能分选 · V05-11 mfg-agent 对接 · V05-12 CP-SAT 预研</td><td>依赖前置能力或外部平台就绪，价值/成本比靠后，GA 前预研即可</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="doc">
+      <h2>交互式任务看板</h2>
+      <div id="dbnote" class="dbnote hidden"></div>
+      <div class="board-toolbar">
+        <select id="f-category"><option value="">全部里程碑/阶段</option></select>
+        <select id="f-role"><option value="">全部角色组</option></select>
+        <select id="f-status">
+          <option value="">全部状态</option>
+          <option>待开始</option><option>进行中</option><option>已完成</option><option>阻塞</option>
+        </select>
+        <input type="search" id="f-search" placeholder="搜索任务编号 / 名称 / 内容…" />
+        <label class="chk"><input type="checkbox" id="f-critical" /> 仅看关键路径</label>
+      </div>
+      <div class="stat-row" id="stats"></div>
+      <div id="board"></div>
+    </section>
+
+    <div class="foot-note">本页面为动态部署，任务看板数据持久化于数据库；架构与任务内容严格对齐《mfg-aps-platform PRD v1.0-draft》MVP（v0.1）范围。进度口径更新于 2026-11-04（M2 收口 <code class="inl">e006679</code>，M3 第一波已交付）。</div>
+  </div>
+</div>
+
+</div><!-- /wrap -->
+
+<script src="/app.js"></script>
+</body>
+</html>

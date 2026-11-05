@@ -1,0 +1,1155 @@
+openapi: 3.0.3
+info:
+  title: 衡策 APS - 甘特图与计划 API
+  version: 0.1.0
+  description: |
+    gantt 分组静态契约（P0-08）。当前已实现：C4（资源甘特）、C24（计划版本发布/回滚/列表/详情）、C29（订单甘特）；C21/C22 为 partial（代码已落地、未做制品级 HTTP 验收）；C33 计划下发/状态为 partial。统一约定见 ../../docs/api/conventions.md。
+    M2 冻结：C21（增量重排锁定）、C22（人工调整/撤销重做）、C24（计划版本发布回滚）、C29（订单甘特读接口）。
+    所有时间字段为 ISO-8601 UTC；planId 一律使用 plan_version.id（UUID），不再以 sandboxId 充当计划 id。
+    甘特图接口返回非分页结构；时间字段为 ISO-8601 UTC。
+servers:
+  - url: /api/v1
+tags:
+  - name: 甘特图
+  - name: 计划
+  - name: 计划下发
+paths:
+  /gantt/resource:
+    get:
+      operationId: resourceGantt
+      tags: [甘特图]
+      summary: 资源甘特图
+      description: |
+        状态：已实现（C4）。按资源泳道返回任务条。
+        实现归属：求解流（S3）；契约见 docs/api/contract-freeze.md C4。
+        返回与 [from, to) 有交集的任务，按 resourceCode、sequenceInResource 稳定排序。
+        每行增量返回 calendarId（可空）与 calendarBound（摘要），解析优先级 资源专属 > 资源组 > 全厂默认。
+      x-implementation-status: implemented
+      x-owner: solve-flow
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - name: resourceCodes
+          in: query
+          description: 资源编码，逗号分隔；为空表示全部
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: false
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfResourceGantt'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /gantt/order:
+    get:
+      operationId: orderGantt
+      tags: [甘特图]
+      summary: 订单甘特图
+      description: |
+        状态：已实现（C29）。按订单泳道返回工序链。
+        late = 任务 endTime 超过订单 dueDate 当日 UTC 23:59:59；订单级 lateMinutes 为整数分钟，
+        仅 late=true 时给出，late=false 时省略或 null（不得填 0 冒充）。
+        订单行额外返回 orderId、productFamily、dueDateLine、orderStatus、lateTaskCount（见 GanttOrderRow）。
+        C50 起订单行再返回 materialName/materialSpec（只读展示字段，来源 material.name/spec）。
+        任务 lockType：M2 由 task.status 推导 FROZEN|NONE，V5 生效后回读 task.lock_type（可扩展 TIME_WINDOW|RESOURCE）。
+        非分页结构，排序固定为 orderNo, operationIndex，不按交期；from/to 只做窗口过滤不改排序。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/SandboxId'
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - name: orderNos
+          in: query
+          description: 订单号，逗号分隔；为空表示全部
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: false
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOrderGantt'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /tasks/{id}/adjust:
+    post:
+      operationId: adjustTask
+      tags: [计划]
+      summary: 人工调整任务
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：MOVE/LOCK/FREEZE/UNFREEZE 与 SPLIT/MERGE 均 200/code 0）。
+        C36（第二批，2026-11-04 冻结）已放行 SPLIT/MERGE；本 yaml 早前“SPLIT/MERGE 返回 50100”与契约冲突，以 C36 为准。
+        实测 SPLIT 100→40/60（新增 1 行、原行 qty=40）；MERGE 50+50→100（合并行软删除，task_adjustment 记 MERGE）。
+        version 与 task.version 不一致返回 40901；FROZEN 任务 MOVE 返回 42201；dryRun=true 只校验不落库。
+        目标任务是 IN_PROGRESS/COMPLETED → 409/40903（任务级：只判目标任务；与 C21/C24 同一语义，不得拆码）。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 排产任务 BIGSERIAL id
+          schema:
+            type: integer
+            format: int64
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskAdjustRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfTaskAdjust'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: 无调整权限（M2 占位放行，M3 接 RBAC）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /tasks/adjustments/{adjustmentId}/undo:
+    post:
+      operationId: undoTaskAdjustment
+      tags: [计划]
+      summary: 撤销任务调整
+      description: 状态：已实现（2026-11-04 制品级 HTTP 验收：POST /tasks/adjustments/6/undo → 200/code 0，task.status=FROZEN/version=8，adjustment.undone=true）。按任务栈撤销最近一次调整；每任务最多 50 步。
+      x-implementation-status: implemented
+      parameters:
+        - name: adjustmentId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfTaskAdjust'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /tasks/adjustments/{adjustmentId}/redo:
+    post:
+      operationId: redoTaskAdjustment
+      tags: [计划]
+      summary: 重做任务调整
+      description: 状态：已实现（2026-11-04 制品级 HTTP 验收：POST /tasks/adjustments/6/redo → 200/code 0，task.status=PLANNED/version=9，adjustment.undone=false）。重做被撤销的调整。
+      x-implementation-status: implemented
+      parameters:
+        - name: adjustmentId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfTaskAdjust'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /tasks/{id}/adjustments:
+    get:
+      operationId: listTaskAdjustments
+      tags: [计划]
+      summary: 任务调整历史
+      description: 状态：已实现（2026-11-04 制品级 HTTP 验收：GET /tasks/900001/adjustments → 200/code 0，分页返回该任务的调整记录）。分页返回该任务的调整记录。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 20
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /plans:
+    get:
+      operationId: listPlans
+      tags: [计划]
+      summary: 计划版本列表
+      description: |
+        状态：已实现（W5，2026-11-04 真实 HTTP 验收：空沙箱 200+items:[]、越界页回边界、缺 sandboxId 400/40000、排序 v5→v1）。
+        按 sandboxId 分页返回场景内计划版本轨迹，排序固定 published_at DESC, id DESC（DESC 为 PostgreSQL NULLS FIRST，未发布版本排在最前），
+        不含任务明细（明细走 GET /plans/{id}）。
+      x-implementation-status: implemented
+      parameters:
+        - name: sandboxId
+          in: query
+          required: true
+          description: 场景 UUID，必填
+          schema:
+            type: string
+            format: uuid
+        - name: page
+          in: query
+          required: false
+          description: 页码，从 1 开始
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: size
+          in: query
+          required: false
+          description: 每页条数；默认 20，上限 200，超限按 200
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 20
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfPlanVersionPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /plans/{id}:
+    get:
+      operationId: getPlanDetail
+      tags: [计划]
+      summary: 计划版本详情
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：GET /plans/{id} → 200/code 0，action.taskCount=6，tasks 返回快照 6 条）。
+        返回版本元信息与该版本不可变快照任务（来自 plan_version.snapshot，不随 task 表变化）。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 计划版本主键（对外 planId）
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfPlanDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /plans/{id}/dispatch:
+    x-milestone: M3
+    post:
+      operationId: dispatchPlan
+      tags: [计划下发]
+      summary: 计划下发
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：POST /plans/{id}/dispatch → 200/code 0，dispatchId=de263c05…，status=QUEUED/targetCount=2；
+        notification_outbox 落 2 行（EMAIL/FEISHU）并推送为 SENT/attempts=1）。
+        仅 PUBLISHED 生效；重复 Idempotency-Key 返回首次 dispatchId（实测同键返回同一 dispatchId）。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 计划版本主键（plan_version.id）
+          schema:
+            type: string
+            format: uuid
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: 幂等键（≤128 字符）；同键重复返回首次 dispatchId
+          schema:
+            type: string
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DispatchRequest'
+      responses:
+        '200':
+          description: 成功（status 固定 QUEUED）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfDispatchResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /plans/{id}/dispatches:
+    x-milestone: M3
+    get:
+      operationId: listPlanDispatches
+      tags: [计划下发]
+      summary: 下发状态
+      description: |
+        状态：已实现（2026-11-04 制品级 HTTP 验收：GET /plans/{id}/dispatches → 200/code 0，total=1，status=SENT/sentCount=2/failedCount=0）。
+        按 createdAt 倒序；返回 QUEUED/SENT/PARTIAL/FAILED 聚合；不扩展 PlanDetailView。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 计划版本主键（plan_version.id）
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfDispatchSummaryPage'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /plans/{id}/publish:
+    post:
+      operationId: publishPlan
+      tags: [计划]
+      summary: 发布计划
+      description: |
+        状态：已实现（C24，W5）。
+        把 plan_version(id=UUID) 的任务快照固化为 PUBLISHED，并回填 task.plan_version_id；重复发布同一版本幂等返回 200（affectedTaskCount=0）。
+        场景已有 PUBLISHED 版本时再发布另一 DRAFT/REVIEW 版本同样返回 200（版本演进），发布路径不返回 40903。
+        approver 未传或 trim 后为空时存 NULL，不回退到 published_by（审批人必须是真人）。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 计划版本 UUID（plan_version.id）
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanPublishRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfPlanAction'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /plans/{id}/rollback:
+    post:
+      operationId: rollbackPlan
+      tags: [计划]
+      summary: 回滚计划
+      description: |
+        状态：已实现（C24，W5）。
+        回滚生成新 plan_version（rollback_of=原版本），不物理回退；场景内存在已执行任务（IN_PROGRESS/COMPLETED）时返回 409/40903（场景级判定）。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 当前计划版本 UUID（plan_version.id）
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanRollbackRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfPlanAction'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /plans/compare:
+    post:
+      operationId: comparePlans
+      tags: [计划]
+      summary: 多计划版本对比与择优
+      description: |
+        状态：契约已冻结（C35，见 docs/api/contract-freeze.md §25.7.2）；W2 实现中，未上线前不可当作可用功能。
+        纯读：不落库、不产生新计划版本；同一输入重复调用返回同一结果（天然幂等，不使用 Idempotency-Key）。
+        权限：SS_READ；权限不足返回 403/40300。
+        `planIds` 按去重后计数，必须为 2–3 个 planId（plan_version.id，UUID）；缺失或个数越界 → 400/40000；
+        任一计划不存在或其版本无快照 → 422/42200。
+        选优确定性可复现：scoreHard 降序（越大越优，0 为无硬违约）→ scoreSoft 降序 → planId 字符串升序；
+        recommendedPlanId 取排序第一，不得随机选或取最新。
+        `metrics` 为 solve_task.metrics 原样 map，不重命名、不裁剪键；不得出现 stepCount/unimprovedStepCount（§24.2 已冻结不再输出）。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PlanCompareRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfPlanCompare'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: 权限不足（code=40300）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+components:
+  parameters:
+    SandboxId:
+      name: sandboxId
+      in: query
+      required: false
+      description: 场景 UUID；为空时取默认 BASELINE 00000000-0000-0000-0000-000000000401
+      schema:
+        type: string
+        format: uuid
+        default: 00000000-0000-0000-0000-000000000401
+    From:
+      name: from
+      in: query
+      required: true
+      description: ISO-8601 UTC
+      schema:
+        type: string
+        format: date-time
+    To:
+      name: to
+      in: query
+      required: true
+      description: ISO-8601 UTC
+      schema:
+        type: string
+        format: date-time
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: 幂等键，8-128 位 [A-Za-z0-9._:-]
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    Page:
+      name: page
+      in: query
+      description: 页码，从 1 开始
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    Size:
+      name: size
+      in: query
+      description: 每页条数，默认 20，上限 200
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 20
+  responses:
+    BadRequest:
+      description: 参数错误（code=40000）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    NotFound:
+      description: 资源不存在（code=40400）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Conflict:
+      description: 状态或幂等冲突（code=40900/40901）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Unprocessable:
+      description: 业务校验失败（code=42200）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    NotImplemented:
+      description: 占位端点未实现（HTTP 501，code=50100）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+  schemas:
+    Result:
+      type: object
+      required: [code, message, traceId]
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          nullable: true
+        traceId:
+          type: string
+    TaskStatus:
+      type: string
+      enum: [PLANNED, FROZEN, IN_PROGRESS, COMPLETED]
+    GanttTask:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        orderNo:
+          type: string
+        operationIndex:
+          type: integer
+        operationName:
+          type: string
+          nullable: true
+        resourceCode:
+          type: string
+          nullable: true
+        secondaryResourceCodes:
+          type: array
+          items:
+            type: string
+        startTime:
+          type: string
+          format: date-time
+          nullable: true
+        endTime:
+          type: string
+          format: date-time
+          nullable: true
+        setupStartTime:
+          type: string
+          format: date-time
+          nullable: true
+        setupEndTime:
+          type: string
+          format: date-time
+          nullable: true
+        qty:
+          type: number
+          nullable: true
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        sequenceInResource:
+          type: integer
+          nullable: true
+        version:
+          type: integer
+        lockType:
+          type: string
+          enum: [NONE, TIME_WINDOW, RESOURCE, FROZEN]
+          description: C21 锁定类型；缺省 NONE。M2 由 task.status 推导 FROZEN|NONE，V5 生效后回读 task.lock_type
+        late:
+          type: boolean
+          description: C29 是否晚于订单交期
+    GanttResourceRow:
+      type: object
+      properties:
+        resourceCode:
+          type: string
+        resourceName:
+          type: string
+        resourceType:
+          type: string
+          description: PRIMARY/SECONDARY/HUMAN/TOOL
+        calendarId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            C4 增量：该资源生效日历的 calendar.id（优先级：资源专属 > 资源组 > 全厂默认）。
+            未绑定任何日历时为 null，前端按全厂默认日历兜底，禁止逐个再查 /calendars。
+        calendarBound:
+          type: boolean
+          description: C4 增量：是否已绑定专属/资源组日历摘要；calendarId 为 null 时固定 false
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/GanttTask'
+    GanttOrderRow:
+      type: object
+      properties:
+        orderId:
+          type: string
+          format: uuid
+          description: 订单主键，供任务跳转/钻取锚点
+        orderNo:
+          type: string
+        materialCode:
+          type: string
+        materialName:
+          type: string
+          maxLength: 256
+          nullable: true
+          readOnly: true
+          x-contract-id: C50
+          description: |
+            C50 新增只读展示字段。来源 orders.product_id → material.name（同一 tenant_id、deleted=false）。
+            物料缺失/已软删除时为 null；不得用 materialCode 冒充名称。
+          example: 储能电池模组
+        materialSpec:
+          type: string
+          maxLength: 512
+          nullable: true
+          readOnly: true
+          x-contract-id: C50
+          description: |
+            C50 新增只读展示字段。来源 orders.product_id → material.spec（同一 tenant_id、deleted=false）。
+            物料缺失/已软删除或 spec 为空时为 null；不得用“—”冒充规格。
+          example: 48V/100Ah
+        productFamily:
+          type: string
+          nullable: true
+          description: 产品族（物料分类编码）
+        dueDate:
+          type: string
+          format: date
+        dueDateLine:
+          type: string
+          format: date-time
+          nullable: true
+          description: 交期线（交期日 23:59:59 UTC）
+        priority:
+          type: string
+          enum: [URGENT, HIGH, NORMAL, LOW]
+        freezeStatus:
+          type: string
+          enum: [UNFROZEN, FROZEN, LOCKED_TIME_WINDOW, LOCKED_RESOURCE]
+        orderStatus:
+          type: string
+          description: 订单业务状态（orders.status）
+        late:
+          type: boolean
+          description: 任务 endTime 是否超过订单 dueDate 当日 UTC 23:59:59
+        lateMinutes:
+          type: integer
+          nullable: true
+          description: 仅 late=true 时给出，整数分钟；late=false 时省略或 null
+        lateTaskCount:
+          type: integer
+          description: 晚交任务数
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/GanttTask'
+    TaskAdjustRequest:
+      type: object
+      required: [operation, version]
+      properties:
+        operation:
+          type: string
+          enum: [MOVE, LOCK, FREEZE, UNFREEZE, SPLIT, MERGE]
+          description: SPLIT/MERGE 在 M2 返回 50100
+        version:
+          type: integer
+          description: 乐观锁版本，过期返回 40901
+        resourceCode:
+          type: string
+          nullable: true
+        secondaryResourceCodes:
+          type: array
+          items:
+            type: string
+        startTime:
+          type: string
+          format: date-time
+          nullable: true
+        endTime:
+          type: string
+          format: date-time
+          nullable: true
+        lockFrom:
+          type: string
+          format: date-time
+          nullable: true
+          description: LOCK 时的时间窗起点
+        lockTo:
+          type: string
+          format: date-time
+          nullable: true
+          description: LOCK 时的时间窗终点，必须大于 lockFrom
+        lockedResourceCodes:
+          type: array
+          items:
+            type: string
+          description: LOCK 时可选的资源锁；为空表示仅锁时间
+        dryRun:
+          type: boolean
+          default: false
+        reason:
+          type: string
+          nullable: true
+          description: FREEZE 时必填
+        frozen:
+          type: boolean
+          default: false
+          deprecated: true
+          description: M1 兼容别名，等价 operation=FREEZE/UNFREEZE
+    TaskAdjustResult:
+      type: object
+      properties:
+        adjustmentId:
+          type: integer
+          format: int64
+          description: task_adjustment.id（BIGSERIAL，对齐 C22 与实现）
+        applied:
+          type: boolean
+        dryRun:
+          type: boolean
+        task:
+          $ref: '#/components/schemas/GanttTask'
+        conflicts:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+              message:
+                type: string
+              relatedTaskIds:
+                type: array
+                items:
+                  type: integer
+                  format: int64
+    PlanPublishRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          nullable: true
+        approver:
+          type: string
+          nullable: true
+          description: 审批人；未传或 trim 后为空时存 NULL，不回退到 published_by（不得用机器标识冒充审批人）
+    PlanRollbackRequest:
+      type: object
+      required: [targetVersionNo]
+      properties:
+        targetVersionNo:
+          type: integer
+          minimum: 1
+        reason:
+          type: string
+          nullable: true
+    PlanAction:
+      type: object
+      properties:
+        planId:
+          type: string
+          format: uuid
+        planNo:
+          type: string
+          nullable: true
+        version:
+          type: integer
+        targetVersionNo:
+          type: integer
+          nullable: true
+        status:
+          type: string
+          enum: [DRAFT, REVIEW, PUBLISHED, ARCHIVED]
+        publishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        affectedTaskCount:
+          type: integer
+    ResultOfResourceGantt:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                sandboxId:
+                  type: string
+                  format: uuid
+                from:
+                  type: string
+                  format: date-time
+                to:
+                  type: string
+                  format: date-time
+                resources:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/GanttResourceRow'
+    ResultOfOrderGantt:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                sandboxId:
+                  type: string
+                  format: uuid
+                from:
+                  type: string
+                  format: date-time
+                to:
+                  type: string
+                  format: date-time
+                orders:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/GanttOrderRow'
+    ResultOfGanttTask:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/GanttTask'
+    ResultOfTaskAdjust:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/TaskAdjustResult'
+    ResultOfPlanAction:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/PlanAction'
+    PlanDetail:
+      type: object
+      description: 计划版本详情；tasks 来自不可变快照，不随 task 表变化
+      properties:
+        action:
+          $ref: '#/components/schemas/PlanAction'
+        tasks:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    ResultOfPlanDetail:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/PlanDetail'
+    PlanVersionSummary:
+      type: object
+      description: 计划版本列表项；不含任务明细（明细走 GET /plans/{id}）
+      properties:
+        planId:
+          type: string
+          format: uuid
+        planNo:
+          type: string
+        version:
+          type: integer
+          description: 业务版本号（version_no），不是乐观锁列 version
+        status:
+          type: string
+          enum: [DRAFT, REVIEW, PUBLISHED, ARCHIVED]
+        publishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        publishedBy:
+          type: string
+          format: uuid
+          nullable: true
+        approver:
+          type: string
+          nullable: true
+          description: 审批人；未填时为 null，响应如实返回 null，前端不得用 publishedBy 顶替显示
+        taskCount:
+          type: integer
+        rollbackOf:
+          type: string
+          format: uuid
+          nullable: true
+    ResultOfPlanVersionPage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/PlanVersionSummary'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer
+    PlanCompareRequest:
+      type: object
+      required: [planIds]
+      properties:
+        planIds:
+          type: array
+          description: 待对比的 planId（plan_version.id，UUID）；按去重后计数必须为 2–3 个
+          minItems: 2
+          maxItems: 3
+          items:
+            type: string
+            format: uuid
+    PlanCompareItem:
+      type: object
+      description: 单个计划版本的对比项；metrics 为 solve_task.metrics 原样透传
+      required: [planId, planNo, version, scoreHard, scoreSoft, taskCount, metrics]
+      properties:
+        planId:
+          type: string
+          format: uuid
+        planNo:
+          type: string
+        version:
+          type: integer
+          description: 业务版本号（version_no），不是乐观锁列 version
+        scoreHard:
+          type: integer
+          description: 硬分，越大越优；0 表示无硬违约
+        scoreSoft:
+          type: integer
+          description: 软分，越大越优
+        taskCount:
+          type: integer
+        metrics:
+          type: object
+          additionalProperties: true
+          description: solve_task.metrics 原样 map，不重命名、不裁剪键；不得包含 stepCount/unimprovedStepCount（§24.2）
+          example:
+            engine: TIMEFOLD
+            phase: DONE
+            progress: 1.0
+            expectedTaskCount: 120
+            assignedTaskCount: 120
+            persistedTaskCount: 120
+    ResultOfPlanCompare:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/PlanCompareItem'
+                recommendedPlanId:
+                  type: string
+                  format: uuid
+                tieBreak:
+                  type: string
+                  description: 选优并列规则，固定为 SCORE_HARD_DESC,SCORE_SOFT_DESC,PLAN_ID_ASC
+                  example: SCORE_HARD_DESC,SCORE_SOFT_DESC,PLAN_ID_ASC
+    DispatchRequest:
+      type: object
+      required: [targets]
+      description: 计划下发请求（PlanDispatchController.DispatchRequest）；字段取自代码，形状未经制品级验收
+      properties:
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/DispatchTarget'
+        message:
+          type: string
+          maxLength: 500
+          description: 附加说明，可空
+    DispatchTarget:
+      type: object
+      required: [channel, address]
+      description: 下发目标（DispatchTargetRequest）
+      properties:
+        channel:
+          type: string
+          maxLength: 16
+          description: EMAIL / SMS / FEISHU
+        address:
+          type: string
+          maxLength: 256
+          description: 目标地址
+    DispatchResult:
+      type: object
+      description: 下发响应（DispatchResultView）；字段取自代码，形状未经制品级验收
+      properties:
+        dispatchId:
+          type: string
+          format: uuid
+        planId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          description: 固定 QUEUED（outbox 入队）
+        targetCount:
+          type: integer
+        queuedAt:
+          type: string
+          format: date-time
+    DispatchSummary:
+      type: object
+      description: 下发批次聚合状态（DispatchSummaryView）；字段取自代码，形状未经制品级验收
+      properties:
+        dispatchId:
+          type: string
+          format: uuid
+        planId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [QUEUED, SENT, PARTIAL, FAILED]
+        targetCount:
+          type: integer
+        sentCount:
+          type: integer
+        failedCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+          description: 最早入队时间
+    ResultOfDispatchResult:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/DispatchResult'
+    ResultOfDispatchSummaryPage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/DispatchSummary'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer

@@ -1,0 +1,308 @@
+# =============================================================================
+# 衡策 APS 开源版 · GitLab CI
+#   阶段：build → lint → test → package → image
+#   与 .github/workflows/ci.yml 使用相同构建命令；说明文档：docs/ci-cd.md
+# =============================================================================
+stages:
+  - build
+  - lint
+  - test
+  - package
+  - image
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository -Dfile.encoding=UTF-8"
+  MAVEN_CLI_OPTS: "-B -ntp"
+  NPM_CONFIG_CACHE: "$CI_PROJECT_DIR/.npm"
+  NPM_CONFIG_FUND: "false"
+  NPM_CONFIG_AUDIT: "false"
+  # dind 服务通过 TLS 暴露 Docker API
+  DOCKER_HOST: "tcp://docker:2376"
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_TLS_VERIFY: "1"
+  DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"
+
+# 避免「分支流水线」与「MR 流水线」重复触发
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+
+default:
+  interruptible: true
+
+# -----------------------------------------------------------------------------
+# build：后端打包（skipTests） + 前端构建
+# -----------------------------------------------------------------------------
+backend:build:
+  stage: build
+  image: maven:3.9-eclipse-temurin-21
+  cache:
+    # Maven 本地仓库缓存：根 pom 变化时更换 key，模块 pom 变化命中同 key（Maven 自行增量解析）
+    key:
+      files:
+        - pom.xml
+        - aps-solver/pom.xml
+    fallback_keys:
+      - maven-fallback
+    paths:
+      - .m2/repository
+    policy: pull-push
+  script:
+    - mvn $MAVEN_CLI_OPTS -DskipTests -Dcheckstyle.skip=true -Dpmd.skip=true package
+  artifacts:
+    name: "aps-admin-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - aps-admin/target/*.jar
+    expire_in: 1 week
+
+frontend:build:
+  stage: build
+  image: node:22-alpine
+  cache:
+    key:
+      files:
+        - aps-frontend/package-lock.json
+    paths:
+      - .npm
+    policy: pull-push
+  script:
+    - cd aps-frontend
+    - npm ci
+    - npm run lint --if-present
+    - npm run build
+  artifacts:
+    name: "aps-frontend-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - aps-frontend/dist
+    expire_in: 1 week
+
+# -----------------------------------------------------------------------------
+# lint：Checkstyle / PMD + ESLint / Prettier
+#   P0-02 已把 Checkstyle/PMD 绑定到 Maven verify 阶段，前端 lint/format:check 脚本已就绪；
+#   --if-present 仅用于兼容早期分支，脚本存在时即强制拦截。
+# -----------------------------------------------------------------------------
+backend:lint:
+  stage: lint
+  image: maven:3.9-eclipse-temurin-21
+  cache:
+    key:
+      files:
+        - pom.xml
+        - aps-solver/pom.xml
+    fallback_keys:
+      - maven-fallback
+    paths:
+      - .m2/repository
+    policy: pull
+  script:
+    - mvn $MAVEN_CLI_OPTS -DskipTests verify
+
+frontend:lint:
+  stage: lint
+  image: node:22-alpine
+  cache:
+    key:
+      files:
+        - aps-frontend/package-lock.json
+    paths:
+      - .npm
+    policy: pull
+  script:
+    - cd aps-frontend
+    - npm ci
+    - npm run lint --if-present
+    - npm run format:check --if-present
+
+# -----------------------------------------------------------------------------
+# test：后端单元测试 + JaCoCo 覆盖率采集（与打包分离）
+# -----------------------------------------------------------------------------
+backend:test:
+  stage: test
+  image: maven:3.9-eclipse-temurin-21
+  cache:
+    key:
+      files:
+        - pom.xml
+        - aps-solver/pom.xml
+    fallback_keys:
+      - maven-fallback
+    paths:
+      - .m2/repository
+    policy: pull
+  script:
+    # pom.xml 尚未接入 jacoco（属骨架/P0-02 范围），以命令行插件方式临时采集；
+    # 正式接入后可退化为 `mvn $MAVEN_CLI_OPTS test`。
+    - >
+      mvn $MAVEN_CLI_OPTS -Dcheckstyle.skip=true -Dpmd.skip=true
+      org.jacoco:jacoco-maven-plugin:0.8.12:prepare-agent test
+      org.jacoco:jacoco-maven-plugin:0.8.12:report
+  artifacts:
+    when: always
+    paths:
+      - "**/target/surefire-reports/**"
+      - "**/target/site/jacoco/**"
+    reports:
+      junit: "**/target/surefire-reports/TEST-*.xml"
+    expire_in: 1 week
+
+# -----------------------------------------------------------------------------
+# test:realdb：真实数据库集成测试（M1 遗留补齐）
+#   M1 全量 verify 中 23 条真实库 IT 依赖 APS_TEST_DB_ENABLED，未设置即被 JUnit
+#   条件静默跳过；本 job 显式开启并初始化 V1 schema，确保门禁真正执行这些用例。
+# -----------------------------------------------------------------------------
+backend:test:realdb:
+  stage: test
+  image: maven:3.9-eclipse-temurin-21
+  services:
+    - name: postgres:15
+      alias: postgres
+      variables:
+        POSTGRES_DB: aps_local
+        POSTGRES_USER: aps
+        POSTGRES_PASSWORD: aps_dev_pwd
+  variables:
+    APS_TEST_DB_ENABLED: "true"
+    APS_TEST_DB_HOST: "postgres"
+    APS_TEST_DB_PORT: "5432"
+    APS_TEST_DB_NAME: "aps_local"
+    APS_TEST_DB_USER: "aps"
+    APS_TEST_DB_PASSWORD: "aps_dev_pwd"
+    PGPASSWORD: "aps_dev_pwd"
+  cache:
+    key:
+      files:
+        - pom.xml
+        - aps-solver/pom.xml
+    fallback_keys:
+      - maven-fallback
+    paths:
+      - .m2/repository
+    policy: pull
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends postgresql-client
+    - until pg_isready -h postgres -p 5432 -U aps -d aps_local; do sleep 2; done
+    - psql -h postgres -p 5432 -U aps -d aps_local -v ON_ERROR_STOP=1 -f db/migration/V1__init.sql
+  script:
+    - >
+      mvn $MAVEN_CLI_OPTS -Dcheckstyle.skip=true -Dpmd.skip=true
+      -pl aps-service -am test
+  artifacts:
+    when: always
+    paths:
+      - "aps-service/target/surefire-reports/**"
+    reports:
+      junit: "aps-service/target/surefire-reports/TEST-*.xml"
+    expire_in: 1 week
+
+# -----------------------------------------------------------------------------
+# package：制品归档（可运行 jar + 前端 dist 打包成发布压缩包）
+# -----------------------------------------------------------------------------
+package:bundle:
+  stage: package
+  image: alpine:3
+  needs:
+    - backend:build
+    - frontend:build
+  script:
+    - mkdir -p release
+    - cp aps-admin/target/*.jar release/
+    - cp -r aps-frontend/dist release/frontend-dist
+    - tar -czf "aps-$CI_COMMIT_SHORT_SHA.tar.gz" release
+  artifacts:
+    name: "aps-release-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - "aps-*.tar.gz"
+    expire_in: 1 week
+
+# -----------------------------------------------------------------------------
+# image：镜像构建与可选推送
+#   MR：仅构建验证（不推送）
+#   默认分支 / tag：构建并推送 GitLab 容器镜像仓库
+# -----------------------------------------------------------------------------
+image:backend:
+  stage: image
+  image: docker:27-cli
+  services:
+    - name: docker:27-dind
+  needs:
+    - backend:build
+    - backend:test
+    - backend:lint
+    - frontend:build
+    - frontend:lint
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      variables:
+        PUSH_IMAGE: "false"
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      variables:
+        PUSH_IMAGE: "true"
+    - if: '$CI_COMMIT_TAG'
+      variables:
+        PUSH_IMAGE: "true"
+  script:
+    - |
+      set -eu
+      IMAGE_REPO="$CI_REGISTRY_IMAGE/aps-admin"
+      SHORT_SHA="sha-$CI_COMMIT_SHORT_SHA"
+      REF_TAG="${CI_COMMIT_TAG:-$CI_COMMIT_REF_SLUG}"
+      if [ "$PUSH_IMAGE" = "true" ]; then
+        docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+      fi
+      docker build --pull -f aps-admin/Dockerfile -t "$IMAGE_REPO:$SHORT_SHA" -t "$IMAGE_REPO:$REF_TAG" .
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag "$IMAGE_REPO:$SHORT_SHA" "$IMAGE_REPO:latest"
+      fi
+      if [ "$PUSH_IMAGE" = "true" ]; then
+        docker push "$IMAGE_REPO:$SHORT_SHA"
+        docker push "$IMAGE_REPO:$REF_TAG"
+        if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+          docker push "$IMAGE_REPO:latest"
+        fi
+      fi
+
+image:frontend:
+  stage: image
+  image: docker:27-cli
+  services:
+    - name: docker:27-dind
+  needs:
+    - backend:build
+    - backend:test
+    - backend:lint
+    - frontend:build
+    - frontend:lint
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      variables:
+        PUSH_IMAGE: "false"
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      variables:
+        PUSH_IMAGE: "true"
+    - if: '$CI_COMMIT_TAG'
+      variables:
+        PUSH_IMAGE: "true"
+  script:
+    - |
+      set -eu
+      IMAGE_REPO="$CI_REGISTRY_IMAGE/aps-frontend"
+      SHORT_SHA="sha-$CI_COMMIT_SHORT_SHA"
+      REF_TAG="${CI_COMMIT_TAG:-$CI_COMMIT_REF_SLUG}"
+      if [ "$PUSH_IMAGE" = "true" ]; then
+        docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+      fi
+      docker build --pull -f aps-frontend/Dockerfile -t "$IMAGE_REPO:$SHORT_SHA" -t "$IMAGE_REPO:$REF_TAG" aps-frontend
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag "$IMAGE_REPO:$SHORT_SHA" "$IMAGE_REPO:latest"
+      fi
+      if [ "$PUSH_IMAGE" = "true" ]; then
+        docker push "$IMAGE_REPO:$SHORT_SHA"
+        docker push "$IMAGE_REPO:$REF_TAG"
+        if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+          docker push "$IMAGE_REPO:latest"
+        fi
+      fi

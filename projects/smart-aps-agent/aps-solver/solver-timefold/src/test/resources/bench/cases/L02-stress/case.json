@@ -1,0 +1,58 @@
+{
+    "caseId":  "L02-stress",
+    "kind":  "HARD_FEASIBLE",
+    "category":  "stress-reference",
+    "sizeClass":  "LARGE",
+    "tags":  [
+                 "hard",
+                 "calendar",
+                 "stress-reference"
+             ],
+    "seed":  0,
+    "budget":  {
+                   "timeoutSeconds":  8,
+                   "unimprovedSecondsSpentLimit":  5,
+                   "maximumStepCount":  0
+               },
+    "problem":  {
+                    "anchor":  "2026-01-05T00:00:00",
+                    "orders":  80,
+                    "operationsPerOrder":  6,
+                    "ordersWithoutRouting":  0,
+                    "resources":  20,
+                    "secondaryResources":  0,
+                    "secondaryWindowHours":  0,
+                    "qty":  12,
+                    "standardSeconds":  600,
+                    "setupSeconds":  600,
+                    "dueOffsetDays":  [
+                                          0,
+                                          1
+                                      ],
+                    "priorityCycle":  [
+                                          "NORMAL",
+                                          "HIGH",
+                                          "URGENT"
+                                      ],
+                    "familyCycle":  [
+                                        "FAM-A",
+                                        "FAM-B"
+                                    ],
+                    "calendar":  "DAY_SHIFT",
+                    "setupMatrix":  "NONE",
+                    "frozenCount":  0,
+                    "frozenOverlap":  false,
+                    "frozenStartHourOffset":  8,
+                    "initialOrders":  0,
+                    "initialStartHourOffset":  8,
+                    "explicitDependencies":  false,
+                    "allTasksSecondary":  true
+                },
+    "expectation":  {
+                        "status":  "REFERENCE",
+                        "expectedHardCodes":  [
+
+                                              ],
+                        "note":  "原始题面：480 个 2h10 任务 / 20 主资源 = 24，超过每资源每周 14 个的上限。记录实测 hard/soft，不作通过线；hard<0 为预期结果。"
+                    }
+}

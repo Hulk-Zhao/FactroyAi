@@ -1,0 +1,6 @@
+缺陷二 publish while RUNNING | POST /api/v1/plans/fabb52e0-d57f-41da-a606-379a5d7d51a2/publish | HTTP 422 | code=42200 | traceId=23a5767b79a44760ae1e3f9f25395a26 | solveTaskId=28, plan.status=DRAFT, boundTasks=0
+缺陷二 publish after SOLVED | POST /api/v1/plans/fabb52e0-d57f-41da-a606-379a5d7d51a2/publish | HTTP 200 | code=0 | traceId=b5093079c49541099ddfbfab5f9080eb | boundTasks=4, plan.task_count=4
+缺陷一 scoped publish | POST /api/v1/plans/69685919-19f7-45fa-b044-8d36583c4403/publish | HTTP 200 | code=0 | traceId=22753aafe1514b708f6b66240f4154a5 | A tasks=0, B tasks=9, plan.task_count=9
+缺陷二 publish while RUNNING | POST /api/v1/plans/66520435-4bd5-42fd-8a18-e423cb4a8422/publish | HTTP 422 | code=42200 | traceId=b8c32e37c11a4f22b66fbf251442fbc5 | solveTaskId=48, plan.status=DRAFT, boundTasks=0
+缺陷二 publish after SOLVED | POST /api/v1/plans/66520435-4bd5-42fd-8a18-e423cb4a8422/publish | HTTP 200 | code=0 | traceId=abcc63eab05b4e16ad0f826484b8315f | boundTasks=4, plan.task_count=4
+缺陷一 scoped publish | POST /api/v1/plans/674d2dd0-7e37-45bd-a32e-8ea1b69fbd66/publish | HTTP 200 | code=0 | traceId=33bd25294bc14ffba899fb5137451dad | A tasks=0, B tasks=9, plan.task_count=9

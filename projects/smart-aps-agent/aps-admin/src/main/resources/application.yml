@@ -1,0 +1,169 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: aps-admin
+  jackson:
+    default-property-inclusion: non_null
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  # 默认 profile 不连接数据库，保证无 DB 环境也能启动；dev profile 覆盖为 Flyway 开启
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:aps}
+    username: ${DB_USER:aps}
+    password: ${DB_PASSWORD:}
+  flyway:
+    enabled: false
+
+# MyBatis-Plus 持久层基座（M1-BD-01）：仅新增本段，不涉及数据源 / Flyway / springdoc
+mybatis-plus:
+  mapper-locations: classpath*:mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+    cache-enabled: false
+  global-config:
+    banner: false
+    db-config:
+      # 主键由调用方或数据库默认值提供（UUID / BIGSERIAL 两种策略并存）
+      id-type: input
+      # 与 V1 的 deleted BOOLEAN 对齐
+      logic-delete-field: deleted
+      logic-delete-value: "true"
+      logic-not-delete-value: "false"
+
+# M2-SE-03 求解异步生命周期与进度推送（C20/C28）
+aps:
+  # C27/P0-1 认证：mode 缺省 prod（安全模式默认开启），off 只能显式配置；
+  # JWT 密钥无内置默认值，未配置时启动失败（ApiSecurityConfigurationValidator）
+  security:
+    mode: ${APS_SECURITY_MODE:prod}
+    jwt:
+      secret: ${APS_SECURITY_JWT_SECRET:}
+      ttl-seconds: ${APS_SECURITY_JWT_TTL_SECONDS:28800}
+      required-role: ${APS_SECURITY_JWT_REQUIRED_ROLE:APS_USER}
+    api-keys:
+      # 仅 dev profile + dev 模式使用；留空表示禁用 API Key 入口（仅 JWT）
+      write: ${APS_SECURITY_API_KEYS_WRITE:}
+      read: ${APS_SECURITY_API_KEYS_READ:}
+    websocket:
+      # P1-4 Origin 白名单，默认仅本地前端开发端口；逗号分隔
+      allowed-origins: ${APS_SECURITY_WS_ALLOWED_ORIGINS:http://localhost:5173,http://127.0.0.1:5173}
+  solve:
+    # POST /solve-tasks 一律返回 SolveTaskDetail（C20），执行方式不影响响应结构；
+    # 此处不再提供 async-enabled 部署开关。
+    # stomp：STOMP 实时推送；none：只缓存快照，前端回退轮询
+    progress-push: ${APS_SOLVE_PROGRESS_PUSH:stomp}
+    # SE-06 引擎异常/超时/不可用降级标记开关
+    fallback-enabled: ${APS_SOLVE_FALLBACK_ENABLED:true}
+    # 有界队列容量；工作线程数与求解槽位对齐（A1），不同场景可同时 RUNNING
+    queue-capacity: ${APS_SOLVE_QUEUE_CAPACITY:32}
+    # 工作线程并发度；0 = 与求解槽位对齐，显式值会被槽位数收窄
+    worker-concurrency: ${APS_SOLVE_WORKER_CONCURRENCY:0}
+    # 超时看门狗宽限秒数，避免与引擎内部 spentLimit 竞争
+    timeout-grace-seconds: ${APS_SOLVE_TIMEOUT_GRACE_SECONDS:5}
+    # A0 求解槽位：同 JVM 可并行求解的任务数；0 = 自动 max(2, min(核数-2, 4))，默认至少 2
+    max-concurrent-solvers: ${APS_SOLVE_MAX_CONCURRENT_SOLVERS:0}
+    # A1 并行候选（Portfolio）：默认关闭，灰度开启后 N 个候选并行跑同一题面，只落库赢家。
+    # 代价是峰值内存/CPU 近似 ×N，候选用量由内存与任务规模 gating 封顶。
+    portfolio:
+      enabled: ${APS_SOLVE_PORTFOLIO_ENABLED:false}
+      # 期望候选数（受 max-candidates 与运行时 gating 约束）
+      candidates: ${APS_SOLVE_PORTFOLIO_CANDIDATES:3}
+      # C54 单次候选数组上限 8；编排侧再封顶 5
+      max-candidates: ${APS_SOLVE_PORTFOLIO_MAX_CANDIDATES:5}
+      # 任务规模阈值：超过则降为单候选（内存估算约 1.14GB/候选 @800 任务）
+      max-tasks-for-portfolio: ${APS_SOLVE_PORTFOLIO_MAX_TASKS:800}
+      # 单候选超时相对整体预算的比例（1.0 = 每个候选最多用满整体预算）
+      candidate-timeout-ratio: ${APS_SOLVE_PORTFOLIO_CANDIDATE_TIMEOUT_RATIO:1.0}
+      # 题面存在冻结分配时是否追加 warm 候选
+      warm-start-candidate: ${APS_SOLVE_PORTFOLIO_WARM_START:true}
+      # A3 回归门禁：>0 时所有候选改用固定步数预算；配合固定 seed 可复现
+      max-step-count: ${APS_SOLVE_PORTFOLIO_MAX_STEP_COUNT:0}
+    # 等待空槽位的上限（秒）；实际取值还会被本次请求超时截断；超时返回不可重试的 SOLVER_BUSY
+    solve-slot-wait-seconds: ${APS_SOLVE_SLOT_WAIT_SECONDS:5}
+    # M3 C37 §25.8.1 重试：仅 ENGINE_ERROR/TIMEOUT/SOLVER_UNAVAILABLE 可重试；
+    # A0 起退避由调度器触发（不占用求解工作线程），测试时钟立即放行
+    retry:
+      # C37 §25.8.1：首次 + 1 次重试 = 最多 2 次尝试；第 2 次仍失败即终态
+      max-retries: ${APS_SOLVE_RETRY_MAX_RETRIES:1}
+      # 固定重试间隔（秒）
+      delay-seconds: ${APS_SOLVE_RETRY_DELAY_SECONDS:30}
+  # MRP 采购建议结果缓存（C34）：single-flight + stale-while-revalidate
+  mrp:
+    # 缓存 TTL（秒）；仅决定何时进入 stale 窗口，不是本次并发修复的手段
+    suggestion-cache-ttl-seconds: ${APS_MRP_SUGGESTION_CACHE_TTL_SECONDS:45}
+    # TTL 到期后旧值最长可继续服务的时长（秒）；超过后请求必须等待新值
+    suggestion-cache-stale-max-seconds: ${APS_MRP_SUGGESTION_CACHE_STALE_MAX_SECONDS:300}
+    # 同一 key 的非主请求等待新值的上限（毫秒）；超时返回 50300
+    suggestion-cache-wait-millis: ${APS_MRP_SUGGESTION_CACHE_WAIT_MILLIS:10000}
+  # 审计身份（C27）：仅 dev 模式生效，用于填充 created_by/updated_by/published_by
+  audit:
+    # 开发态缺省操作人 UUID（X-User-Id 未带时使用）；生产禁用，prod 走 JWT subject
+    dev-user-id: ${APS_AUDIT_DEV_USER_ID:}
+  # 业务时区（C32 compare 交期截止点口径）：部署机时区不可信，显式配置，默认 Asia/Shanghai
+  business:
+    time-zone: ${APS_BUSINESS_TIME_ZONE:Asia/Shanghai}
+  # 日历时区（C14）：复用业务时区环境变量，未显式配置时与 aps.business.time-zone 同步
+  calendar:
+    timezone: ${APS_CALENDAR_TIMEZONE:${APS_BUSINESS_TIME_ZONE:Asia/Shanghai}}
+  # 通知 outbox 轮询驱动（C33）：默认关闭；仅 dev profile 在 application-dev.yml 打开
+  notification:
+    scheduler:
+      enabled: false
+      # 轮询固定间隔（毫秒），对应 @Scheduled fixedDelay
+      interval-ms: 30000
+  # Agent 基础框架（V05-01 / C43）：provider 默认 none，无凭证环境不发起任何模型调用
+  # 凭证只允许通过环境变量注入；此处仅出现变量名，不含任何默认密钥
+  agent:
+    enabled: ${APS_AGENT_ENABLED:true}
+    llm:
+      # 优先级：环境变量 > 本文件同名配置 > 缺省。
+      # provider: APS_AGENT_LLM_PROVIDER（deepseek|qwen|ollama|none，缺省 none，不发起任何调用）
+      # 扁平覆盖项非空时优先于下面 deepseek/qwen/ollama 各端点的同名字段；
+      # 单独配置某家 provider 也可直接写端点字段（兼容旧变量 DS_URL/DS_KEY 等）。
+      # 密钥只允许来自环境变量/本机配置，禁止写入日志、响应与异常。
+      provider: ${APS_AGENT_LLM_PROVIDER:${LLM_PROVIDER:none}}
+      base-url: ${APS_AGENT_LLM_BASE_URL:}
+      api-key: ${APS_AGENT_LLM_API_KEY:}
+      model: ${APS_AGENT_LLM_MODEL:}
+      # 秒；留空表示沿用 timeout-millis（缺省 10 秒）
+      timeout-seconds: ${APS_AGENT_LLM_TIMEOUT_SECONDS:}
+      timeout-millis: ${APS_AGENT_LLM_TIMEOUT_MILLIS:10000}
+      max-tokens: ${APS_AGENT_LLM_MAX_TOKENS:512}
+      deepseek:
+        base-url: ${DS_URL:}
+        api-key: ${DS_KEY:}
+        model: ${DS_MODEL:${DS_MODEL_L1:deepseek-chat}}
+      qwen:
+        base-url: ${QW_URL:}
+        api-key: ${QW_KEY:}
+        model: ${QW_MODEL:qwen-plus}
+      ollama:
+        base-url: ${OLLAMA_BASE_URL:http://127.0.0.1:11434}
+        model: ${OLLAMA_MODEL:qwen3.5:9b}
+    checkpoint:
+      enabled: ${APS_AGENT_CHECKPOINT_ENABLED:true}
+    prompt:
+      # 默认 Prompt 键；首次使用时以 aps.agent.prompt.default-content 落库为版本 1
+      default-key: ${APS_AGENT_PROMPT_DEFAULT_KEY:agent.default}
+
+logging:
+  level:
+    root: INFO
+    com.hengce.aps: INFO
+
+# OpenAPI / Swagger（P0-08）；分组定义见 OpenApiConfiguration
+# P2-7：prod 默认关闭，避免生产暴露完整 API 结构；dev profile 在 application-dev.yml 显式打开
+springdoc:
+  api-docs:
+    enabled: ${APS_SPRINGDOC_ENABLED:false}
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: ${APS_SPRINGDOC_ENABLED:false}
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+    try-it-out-enabled: true
+  default-produces-media-type: application/json

@@ -1,0 +1,1719 @@
+openapi: 3.0.3
+info:
+  title: 衡策 APS - 求解与 Agent API
+  version: 0.1.0
+  description: |
+    solve 分组静态契约（P0-08）。已实现：POST /solve-tasks、GET /solve-tasks/{id}、取消、增量重排、justifications、C19 受控 DSL；其余为占位。
+    M2 冻结：C19（策略规则与受控 DSL）、C20（异步生命周期/取消/STOMP 进度）、C21（增量重排）、C28（引擎降级）。
+    统一约定见 ../../docs/api/conventions.md。
+    WebSocket 进度推送：/ws/solve-tasks/{id}，STOMP 订阅 /topic/solve-tasks/{id}，消息 SolveProgress，不纳入 OpenAPI paths。
+    GET /solve-tasks/{id} 是唯一事实源；STOMP 只推送（快照为 best-effort，可能丢失），断线后前端回退 2 秒轮询，重连先 GET 对账。
+servers:
+  - url: /api/v1
+tags:
+  - name: 求解
+  - name: Agent
+x-websocket-endpoints:
+  /ws/solve-tasks/{id}:
+    description: |
+      求解进度推送（STOMP over WebSocket）；{id} 为 solve_task BIGSERIAL id。
+      订阅目的地：/topic/solve-tasks/{id}；连接后服务端尝试立即推送当前快照，但**是 best-effort、可能丢失**
+      （SUBSCRIBE 异步注册与推送给出的时序竞态，C20 §24.2）。
+      客户端连接后必须无条件补一次 GET /solve-tasks/{id} 并与推送帧合并；终态任务首帧一丢即永久空白，兜底不得删。
+      推送节流：状态变化立即推送，progress/bestScore 最多 1 次/秒；终态必推一次并含 resultTaskId。
+      不重放历史消息；事实源为 GET /solve-tasks/{id}。回滚开关 aps.solve.progress-push=poll。
+    messageSchema:
+      $ref: '#/components/schemas/SolveProgress'
+paths:
+  /solve-tasks:
+    post:
+      operationId: submitSolveTask
+      tags: [求解]
+      summary: 提交求解任务
+      description: |
+        状态：已实现。请求 engine 为空时使用 timefold。
+        一律返回 SolveTaskDetail（C20）：状态使用六值枚举
+        PENDING/RUNNING/SOLVED/FAILED/CANCELLED/TIMEOUT，SUCCESS 已废弃；
+        SOLVED 时 tasks[] 返回场景任务快照。调用方按 GET /solve-tasks/{id} 轮询终态。
+        订单范围（C5 §7 / C20 §24.2）：orders 无 sandbox_id，订单只按 tenant 过滤，sandboxId 只决定任务写入场景。
+        未传 orderNos 时只取 status=CONFIRMED；显式 orderNos 覆盖 onlyConfirmed（DRAFT/SCHEDULED/RELEASED/IN_PROGRESS/COMPLETED 照排），
+        但 CANCELLED 必须拒绝 400/40000 并逐字点名。该拒绝行为当前未实现，属 M2 必须补（W4），不随本端点计为已实现。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SolveSubmitRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfSolveTaskDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /solve-tasks/{id}:
+    get:
+      operationId: getSolveTask
+      tags: [求解]
+      summary: 求解任务详情
+      description: |
+        状态：已实现（C20 事实源）。返回 SolveTaskDetail；终态 SOLVED 时含 tasks[] 场景任务快照。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 求解任务 BIGSERIAL id
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfSolveTaskDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /solve-tasks/{id}/cancel:
+    post:
+      operationId: cancelSolveTask
+      tags: [求解]
+      summary: 取消求解任务
+      description: |
+        状态：已制品级验收（2026-11-04，车道C）。仅 PENDING/RUNNING 可取消；其他状态返回 40901。
+        取消后任务进入 CANCELLED，并终止正在运行的 Solver。
+        验收证据：200 + status=CANCELLED、phase=CANCELLED 落库，且该场景无任务行写入；终态取消 409/40901、不存在 404/40400。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 求解任务 BIGSERIAL id
+          schema:
+            type: integer
+            format: int64
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfSolveTaskDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /solve-tasks/{id}/justifications:
+    get:
+      operationId: listSolveTaskJustifications
+      tags: [求解]
+      summary: 求解任务约束归因
+      description: |
+        状态：已实现（M2-SE-05）。不分页（规模上限 8 行/次）；固定排序 deduction DESC, constraintCode ASC。
+        空结果返回 200 + data: []（不是 404）；任务不存在返回 404/40400。
+        deduction 是规则聚合后的扣分（weight × 违反量），不是逐条事实明细。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 求解任务 BIGSERIAL id
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfConstraintJustificationList'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /solve-tasks/{id}/infeasibility:
+    x-milestone: M3
+    x-contract-id: C51
+    get:
+      operationId: getSolveInfeasibility
+      tags: [求解]
+      summary: 求解不可行证据
+      description: |
+        状态：已实现（C51，2026-11-05）。证据在求解终态后落库；查询先读落库，未命中现算。
+
+        失败/超时任务同样可查；无证据返回 200 + verdict=NO_EVIDENCE（不是 404/500）。
+        数组每类最多 8 条，截断时 truncated=true。三档强度递增：
+        NO_EVIDENCE：未取得任何结构性证据；绝不能解读为“不可行”，也不能用于对外解释失败原因
+        （典型来源：预算耗尽、引擎错误、题面无法重放）。
+        PARTIAL_EVIDENCE：有证据但不构成必然矛盾（例如只有缺数据类阻塞，或终态不是 FAILED/TIMEOUT）；
+        是“线索”，不是“结论”。
+        NO_FEASIBLE_SOLUTION_FOUND：在当前题面、当前约束模型、168h 视野下存在必然矛盾
+        （资源窗口无法整块容纳、notBefore 越过视野、冻结任务越界、冻结任务同资源区间重叠、
+        固定主资源 run-only 工时超窗口，五类之一）。可对外解释“为什么排不出来”，但必须同时给出该边界；
+        不是数学意义上的永不可行，换日历、加资源、解冻、放宽交期后可能可行（交由 C52 反事实验证）。
+        禁止把“预算耗尽 / 求解超时 / 引擎失败 / 只拿到 PARTIAL”说成“已证明不可行”；
+        禁止“数学上永不可行”“任何情况下都排不出来”等无限定语。不改 C19 justifications 的 8 条语义。
+      x-implementation-status: implemented
+      x-implementation-note: |
+        落库表 infeasibility_report（迁移 V15），唯一键 (tenant_id, solve_task_id)，终态后置处理器 upsert。
+        NO_EVIDENCE 的 generatedAt 由数据库 CHECK 强制为 NULL（verdict <> 'NO_EVIDENCE' OR generated_at IS NULL
+        与反向 verdict = 'NO_EVIDENCE' OR generated_at IS NOT NULL 两条），不允许任何兜底。
+        落库未命中时按 solve_task.config 现算，并在 assumptions 明写“未落库”。
+        solverRunId 不由终态事件携带，取不到时保持 null，不编造。
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 求解任务 BIGSERIAL id
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 证据（可能为 NO_EVIDENCE / PARTIAL_EVIDENCE / NO_FEASIBLE_SOLUTION_FOUND）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfInfeasibilityReport'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /solve-tasks/{id}/counterfactual:
+    x-milestone: M3
+    x-contract-id: C52
+    post:
+      operationId: verifySolveCounterfactual
+      tags: [求解]
+      summary: 反事实修复验证（只读）
+      description: |
+        状态：占位（C52 契约已冻结，Wave 0 未实现）。真实实现返回 501/50100。
+
+        只读重解：不写 plan_version/task/orders/solve_task，mainPlanWritten 恒为 false。
+        仅 VERIFIED_FEASIBLE 的 changes 可带新日期/资源；STILL_INFEASIBLE 不得返回建议日期；
+        UNVERIFIED/OUT_OF_BUDGET 必须明确未验证。最多 3 候选 × 5–10s，总预算 30s。
+      x-implementation-status: placeholder
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 求解任务 BIGSERIAL id
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CounterfactualRequest'
+      responses:
+        '200':
+          description: 验证结论
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfCounterfactualResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /solve-tasks/incremental:
+    post:
+      operationId: submitIncrementalSolveTask
+      tags: [求解]
+      summary: 提交增量重排任务
+      description: |
+        M2 冻结 C21。以 baseSolveTaskId 为 startingSolution，仅重排 affectedTaskIds 中的非冻结任务。
+        写入新 solve_task 行，并在计划域生成新的 plan_version(DRAFT)；不得覆盖已 PUBLISHED 的任务。
+        FROZEN 优先级高于 lockType(FROZEN/TIME_WINDOW/RESOURCE) 高于 M1 的 frozen 布尔别名。
+        场景内存在 IN_PROGRESS/COMPLETED → 409/40903（场景级；与 C22/C24 同一语义，不得拆码）。
+        状态：已制品级验收（2026-11-04，车道C）。整场景重排（affectedTaskIds 缺省）与单订单子集重排均返回 200 并收敛到
+        SOLVED（hardScore=0、unassignedTaskCount=0）；新 solve_task + 新 plan_version(DRAFT) 落库，pinned 订单任务 ID 不变。
+        响应结构已由契约 §24.3.1 冻结：统一外壳 {code,message,data,traceId}，data 为 IncrementalSolveResult
+        （planId/solveTaskId/baseSolveTaskId/sandboxId/affectedOrderCount/orderNos/skippedLockedTaskCount/solveTask），
+        不是裸对象。任务级 FROZEN/锁语义未在本车道做专项验收。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IncrementalSolveRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfIncrementalSolveResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /constraint-dsls/validate:
+    post:
+      operationId: validateConstraintDsl
+      tags: [求解]
+      summary: 校验 DSL（不落库）
+      description: |
+        C19 冻结。非法 DSL 仍返回 200，由报告内 valid=false 表达；问题码为 422xx。
+        状态：已制品级验收（2026-11-04，车道C）。合法 DSL 返回 valid=true、ruleCount=8；非法 DSL 返回 200 + valid=false + 422xx，且不落库。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConstraintDslValidateRequest'
+      responses:
+        '200':
+          description: 校验报告
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfDslValidationReport'
+  /constraint-dsls:
+    post:
+      operationId: createConstraintDsl
+      tags: [求解]
+      summary: 创建 DSL 草稿版本
+      description: |
+        C19 冻结。校验通过后写入 DRAFT 版本，versionNo 自增；失败 42200。
+        状态：已制品级验收（2026-11-04，车道C）。连续创建同 code 返回 200 且 versionNo 递增，constraint_dsl 新增 DRAFT 行；非法 DSL 返回 422/42200。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConstraintDslCreateRequest'
+      responses:
+        '200':
+          description: 新版本
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfConstraintDsl'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    get:
+      operationId: listConstraintDslVersions
+      tags: [求解]
+      summary: 某 code 的全部版本
+      description: 状态：已制品级验收（2026-11-04，车道C）。versionNo 倒序，不分页；返回行数与 constraint_dsl 中该 code 的落库版本数一致。
+      x-implementation-status: implemented
+      parameters:
+        - name: code
+          in: query
+          required: true
+          description: DSL 标识
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 版本列表
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfConstraintDslList'
+  /constraint-dsls/{id}:
+    get:
+      operationId: getConstraintDsl
+      tags: [求解]
+      summary: DSL 版本详情
+      description: 状态：已制品级验收（2026-11-04，车道C）。返回完整 ConstraintDslView（含非空 compiledSpec）；不存在返回 404/40400。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfConstraintDsl'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /constraint-dsls/{id}/activate:
+    post:
+      operationId: activateConstraintDsl
+      tags: [求解]
+      summary: 激活 DSL 版本
+      description: 状态：已制品级验收（2026-11-04，车道C）。同 code 仅一条 ACTIVE，原 ACTIVE 转 ROLLBACK；响应含非空 compiledSpec，落库状态一致。不存在 404/40400。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfConstraintDsl'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /constraint-dsls/{id}/rollback:
+    post:
+      operationId: rollbackConstraintDsl
+      tags: [求解]
+      summary: 回滚 DSL 版本
+      description: 状态：已制品级验收（2026-11-04，车道C）。当前 ACTIVE 置 ROLLBACK，目标版本置 ACTIVE 并记 rollbackOf；两版本 compiledSpec 快照均保留。不存在 404/40400。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfConstraintDsl'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /agent/events:
+    x-milestone: M3
+    post:
+      operationId: reportAgentEvent
+      tags: [Agent]
+      summary: 上报异常事件
+      description: >-
+        状态：已实现（C45）。事件落既有 audit_log（action=AGENT_EVENT_REPORTED，
+        resource_type=AGENT_EVENT），不新建平行事件表。Idempotency-Key 必填且作为事件标识，
+        同租户重复上报返回既有行（duplicate=true），不新增审计行。租户与操作人取自认证上下文，
+        请求体携带 userId/tenantId 一律 400/40000。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentEventRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /agent/nl-to-dsl:
+    x-milestone: M3
+    post:
+      operationId: nlToDsl
+      tags: [Agent]
+      summary: 自然语言转 DSL
+      description: >-
+        状态：占位（501/50100）。按产品裁定保持未实现。说明：本工作区由并行车道开始接入
+        DSL→求解（ScheduleProblemAssembler 主路径已把 constraints 传入求解器），
+        ATP 只读路径仍传空列表；但 NL→DSL 仍缺少可验收的强制审核闭环——
+        生成结果必须只落 DRAFT、经人工审核 + 沙箱验证后才生效，且翻译语义需通过
+        42200/42201–42207 校验。该闭环完成前开放端点会产出未经审核的 DSL，故返回 501。
+      x-implementation-status: placeholder
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NlToDslRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfNlToDsl'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /agent/explain/{taskId}:
+    x-milestone: M3
+    get:
+      operationId: explainTask
+      tags: [Agent]
+      summary: 归因解释
+      description: >-
+        状态：已实现（C45）。taskId 是排产任务主键（task.id），归因按 solve_task 持久化，
+        服务端用 constraint_justification.implicated_facts 反查。0 条返回 200 + available=false +
+        noDataReason=NO_JUSTIFICATION_RECORD；命中多个 solve_task 返回 200 + available=false +
+        noDataReason=AMBIGUOUS_SOLVE_TASK + sourceSolveTaskCandidates，禁止猜测。
+        source 当前恒为 EVIDENCE；source=LLM 的位置由 llm 字段预留，模型未配置时输出产品定稿降级文案。
+      x-implementation-status: implemented
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfExplain'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /agent/whatif:
+    x-milestone: M3
+    post:
+      operationId: whatIf
+      tags: [Agent]
+      summary: 对话式 what-if
+      description: >-
+        状态：已实现（C45，确定性版）。仅在 WHAT_IF 场景内同步真实求解，随后复用沙箱 compare
+        返回前/后差异、影响订单与瓶颈变化；不直接修改主计划，不做多轮对话或模型外壳。
+        parameters 仅支持 orderNos/strategyId/engine/timeoutSeconds/moveThreadCount/acceptor/randomSeed/
+        maxSteps/unimprovedSecondsSpentLimit/direction/useFrozenAssignments，未知参数返回 422/42200
+        并逐一点名；BASELINE/ARCHIVED 场景一律 422/42200。求解失败返回 200 + available=false，
+        answer 使用产品定稿降级文案。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WhatIfRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfWhatIf'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: 幂等键，8-128 位 [A-Za-z0-9._:-]
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+  responses:
+    BadRequest:
+      description: 参数错误（code=40000）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    NotFound:
+      description: 资源不存在（code=40400）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Conflict:
+      description: 状态或幂等冲突（code=40900/40901）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Unprocessable:
+      description: 业务校验失败（code=42200）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    NotImplemented:
+      description: 占位端点未实现（HTTP 501，code=50100）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+  schemas:
+    Result:
+      type: object
+      required: [code, message, traceId]
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+        data:
+          nullable: true
+        traceId:
+          type: string
+    SolverEngine:
+      type: string
+      enum: [timefold, ortools]
+      default: timefold
+    SolveSubmitRequest:
+      type: object
+      properties:
+        taskNo:
+          type: string
+          description: |
+            客户端关联号（非主键），响应原样回显；为空时由服务端生成展示用编号。
+            M1 的求解任务主键统一为 solve_task 的 BIGSERIAL id。
+        sandboxId:
+          type: string
+          format: uuid
+          description: 场景 UUID；为空时取默认 BASELINE 00000000-0000-0000-0000-000000000401
+        strategyId:
+          type: string
+          format: uuid
+          nullable: true
+          description: 排产策略 UUID；为空表示使用默认策略
+        engine:
+          $ref: '#/components/schemas/SolverEngine'
+        orderNos:
+          type: array
+          description: |
+            显式订单号；为空时只排 status=CONFIRMED 的订单。
+            显式点名覆盖该状态过滤（DRAFT/SCHEDULED/RELEASED/IN_PROGRESS/COMPLETED 照排），
+            但 CANCELLED 必须拒绝 400/40000 并逐字点名（C20 §24.2；当前未实现，M2 必须补，责任人 W4）。
+            订单按租户读取，无沙箱归属校验。
+          items:
+            type: string
+        parameters:
+          type: object
+          additionalProperties: true
+    ScheduledTask:
+      type: object
+      required: [orderNo, resourceCode, startTime, endTime]
+      properties:
+        orderNo:
+          type: string
+        resourceCode:
+          type: string
+        startTime:
+          type: string
+          format: date-time
+          description: ISO-8601 UTC（C7）
+        endTime:
+          type: string
+          format: date-time
+    ConstraintJustification:
+      type: object
+      description: |
+        约束归因；软约束按 constraintCode 聚合为一行（最多 8 行/次）。
+        weight/deduction 为 V7 增补字段；硬约束 weight=null、deduction=0。
+      required: [constraintCode, type, taskIds, description, deduction]
+      properties:
+        constraintCode:
+          type: string
+          description: |
+            规则键：软约束取自 RuleCode（8 条），硬约束取自 ConstraintCodes 的 8 条硬约束编码；
+            禁止用中文标题当键，中文只允许出现在 description。
+        type:
+          type: string
+          enum: [HARD, SOFT]
+        taskIds:
+          type: array
+          description: 聚合后的受影响任务主键（求解期新解由结果写回阶段回填）
+          items:
+            type: integer
+            format: int64
+        description:
+          type: string
+          description: 面向人的中文说明
+        weight:
+          type: integer
+          nullable: true
+          description: 该规则求解时生效权重；硬约束为 null
+        deduction:
+          type: number
+          description: |
+            该规则聚合后的软分扣分，正数表示被扣掉的分（weight × 违反量）；
+            不是逐条违反事实的明细；硬约束为 0。始终输出。
+    ResultOfConstraintJustificationList:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/ConstraintJustification'
+    ConstraintDslView:
+      type: object
+      description: C19 受控 DSL 版本视图
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        versionNo:
+          type: integer
+        status:
+          type: string
+          enum: [DRAFT, ACTIVE, ROLLBACK]
+        checksum:
+          type: string
+          description: 规范化 YAML 的 SHA-256
+        rollbackOf:
+          type: string
+          format: uuid
+          nullable: true
+        effectiveFrom:
+          type: string
+          format: date-time
+          nullable: true
+        yamlText:
+          type: string
+        compiledSpec:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+    ConstraintDslValidateRequest:
+      type: object
+      required: [yamlText]
+      properties:
+        yamlText:
+          type: string
+          description: YAML 文本，≤256KB
+    ConstraintDslCreateRequest:
+      type: object
+      required: [code, yamlText]
+      properties:
+        code:
+          type: string
+        yamlText:
+          type: string
+    DslValidationIssue:
+      type: object
+      properties:
+        code:
+          type: integer
+        field:
+          type: string
+        message:
+          type: string
+    DslValidationReport:
+      type: object
+      required: [valid, issues]
+      properties:
+        valid:
+          type: boolean
+        issues:
+          type: array
+          items:
+            $ref: '#/components/schemas/DslValidationIssue'
+    ResultOfConstraintDsl:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ConstraintDslView'
+    ResultOfConstraintDslList:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/ConstraintDslView'
+    ResultOfDslValidationReport:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/DslValidationReport'
+    SolveTaskStatus:
+      type: string
+      enum: [PENDING, RUNNING, SOLVED, FAILED, CANCELLED, TIMEOUT]
+    SolveTaskDetail:
+      type: object
+      description: C20 唯一求解响应体；DB 与 API 使用同一六值状态枚举（SUCCESS 已废弃）
+      required: [taskId, status]
+      properties:
+        taskId:
+          type: integer
+          format: int64
+          description: solve_task BIGSERIAL 主键（数字 id）
+        sandboxId:
+          type: string
+          format: uuid
+        strategyId:
+          type: string
+          format: uuid
+          nullable: true
+        engine:
+          type: string
+          description: 引擎编码，大写落库值 TIMEFOLD/ORTOOLS/RULE_BASED
+        status:
+          $ref: '#/components/schemas/SolveTaskStatus'
+        progress:
+          type: number
+          minimum: 0
+          maximum: 1
+        phase:
+          type: string
+          enum: [QUEUED, ASSEMBLING, SOLVING, PERSISTING, DONE, FAILED, CANCELLED, TIMEOUT]
+          description: |
+            当前阶段，始终输出。PENDING=QUEUED；RUNNING 期间为 ASSEMBLING/SOLVING/PERSISTING；
+            SOLVED 对应 DONE；其余终态对应同名值（FAILED/CANCELLED/TIMEOUT）。
+            不得混用 C19 策略规则 phase（INITIAL/OPTIMIZATION/FINALIZING）或 status 值。
+        bestScore:
+          type: string
+          nullable: true
+        scoreHard:
+          type: integer
+          format: int64
+          nullable: true
+        scoreSoft:
+          type: integer
+          format: int64
+          nullable: true
+        elapsedMs:
+          type: integer
+          format: int64
+        resultTaskId:
+          type: integer
+          format: int64
+          nullable: true
+        errorCode:
+          type: string
+          nullable: true
+          description: 失败/超时原因码（ENGINE_ERROR/TIMEOUT/FAILED/CANCELLED/SOLVER_BUSY）；成功为 null。SOLVER_BUSY 仅用于 C28 容量拒绝
+        errorMessage:
+          type: string
+          nullable: true
+        degraded:
+          type: boolean
+          description: C28 是否发生引擎异常/超时降级
+        metrics:
+          type: object
+          properties:
+            engineFallbackReason:
+              $ref: '#/components/schemas/EngineFallbackReason'
+            engineFallbackDetail:
+              $ref: '#/components/schemas/EngineFallbackDetail'
+          description: |
+            C28 降级标记键 engineFallback/engineFallbackReason/fallbackMode/fallbackAt/terminationReason。
+            engineFallbackReason 闭集见 EngineFallbackReason：TIMEOUT/ENGINE_ERROR/SOLVER_UNAVAILABLE 可重试；
+            SOLVER_BUSY 是容量拒绝（求解槽位等待超时），不可重试，应让调用方稍后重投。
+            engineFallbackDetail 闭集见 EngineFallbackDetail（含 LOCK_CONTENTION）。
+            C54 新增稳定键：portfolio（SolvePortfolioObservation，关闭时键不存在）、timeToBestMs、
+            scoreHistory（最多 200 点，空时为 []）。
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        tasks:
+          type: array
+          description: status=SOLVED 时返回 sandbox 场景任务快照；其余状态为空数组
+          items:
+            $ref: '#/components/schemas/ScheduledTask'
+    SolveProgress:
+      type: object
+      description: |
+        C20 STOMP 进度消息；progress 0-1，终态=1。
+        声明的字段一律输出（null 表示该阶段无此值），键存在性不承载业务含义。
+      properties:
+        taskId:
+          type: integer
+          format: int64
+        status:
+          $ref: '#/components/schemas/SolveTaskStatus'
+        progress:
+          type: number
+          minimum: 0
+          maximum: 1
+        phase:
+          type: string
+          enum: [QUEUED, ASSEMBLING, SOLVING, PERSISTING, DONE, FAILED, CANCELLED, TIMEOUT]
+          description: 与 SolveTaskDetail.phase 同一枚举；始终输出
+        bestScore:
+          type: string
+          nullable: true
+          description: Timefold 分数文本；未知时为 null，键仍存在
+        elapsedMs:
+          type: integer
+          format: int64
+        resultTaskId:
+          type: integer
+          format: int64
+          nullable: true
+          description: 仅 SOLVED 有值，其余为 null
+        errorCode:
+          type: string
+          nullable: true
+          description: 失败/超时原因码（ENGINE_ERROR/TIMEOUT/FAILED/CANCELLED/SOLVER_BUSY）；成功为 null。SOLVER_BUSY 仅用于 C28 容量拒绝
+        message:
+          type: string
+          nullable: true
+    IncrementalSolveRequest:
+      type: object
+      required: [baseSolveTaskId]
+      properties:
+        baseSolveTaskId:
+          type: integer
+          format: int64
+        affectedTaskIds:
+          type: array
+          items:
+            type: integer
+            format: int64
+        sandboxId:
+          type: string
+          format: uuid
+          nullable: true
+        reason:
+          type: string
+          nullable: true
+    AgentEventRequest:
+      type: object
+      description: >-
+        只接受系统内真实发生的动作族。userId/tenantId 不接受客户端指定，由认证上下文决定。
+        Idempotency-Key 必填（8-128 位 [A-Za-z0-9._:-]），作为事件标识。
+      required: [eventType, occurredAt]
+      additionalProperties: false
+      properties:
+        eventType:
+          type: string
+          enum: [ORDER_STATUS_CHANGED, SOLVE_TASK_FINISHED, PLAN_PUBLISHED, TASK_ADJUSTED]
+        orderNo:
+          type: string
+          nullable: true
+        resourceCode:
+          type: string
+          nullable: true
+        occurredAt:
+          type: string
+          format: date-time
+          description: 必须带时区的 ISO-8601 时间
+        payload:
+          type: object
+          description: 事件明细快照；敏感字段按既有审计脱敏规则写入
+    NlToDslRequest:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+        sandboxId:
+          type: string
+          format: uuid
+          nullable: true
+        context:
+          type: object
+    NlToDslResult:
+      type: object
+      properties:
+        dsl:
+          type: object
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+        warnings:
+          type: array
+          items:
+            type: string
+    ExplainResult:
+      type: object
+      description: >-
+        C45：确定性证据形态。source 当前恒为 EVIDENCE；LLM 形态由 llm 字段预留，
+        confidence 不对外输出。映射不唯一或无记录时 available=false，不编造原因。
+      properties:
+        taskId:
+          type: integer
+          format: int64
+        taskType:
+          type: string
+          enum: [TASK]
+        available:
+          type: boolean
+        source:
+          type: string
+          enum: [EVIDENCE, LLM]
+        noDataReason:
+          type: string
+          nullable: true
+          enum: [NO_JUSTIFICATION_RECORD, AMBIGUOUS_SOLVE_TASK]
+        sourceSolveTaskId:
+          type: integer
+          format: int64
+          nullable: true
+        sourceSolveTaskCandidates:
+          type: array
+          items:
+            type: integer
+            format: int64
+        solveTaskStatus:
+          type: string
+          nullable: true
+        scoreHard:
+          type: integer
+          format: int64
+          nullable: true
+        scoreSoft:
+          type: integer
+          format: int64
+          nullable: true
+        unassignedTaskCount:
+          type: integer
+          format: int64
+          nullable: true
+        degraded:
+          type: boolean
+        metrics:
+          type: object
+        justificationIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        constraintImpacts:
+          type: array
+          items:
+            type: object
+            properties:
+              justificationId:
+                type: string
+                format: uuid
+              constraintId:
+                type: string
+              constraintName:
+                type: string
+                nullable: true
+              scoreImpact:
+                type: string
+                nullable: true
+              hard:
+                type: boolean
+              weight:
+                type: integer
+                nullable: true
+              deduction:
+                type: number
+                nullable: true
+              affectedTaskIds:
+                type: array
+                items:
+                  type: integer
+                  format: int64
+              description:
+                type: string
+        planVersions:
+          type: array
+          items:
+            type: object
+            properties:
+              planId:
+                type: string
+                format: uuid
+              planNo:
+                type: string
+              versionNo:
+                type: integer
+              status:
+                type: string
+              publishedAt:
+                type: string
+                format: date-time
+                nullable: true
+              taskCount:
+                type: integer
+        planVersionEvidenceTruncated:
+          type: boolean
+        summary:
+          type: string
+        narrative:
+          type: string
+          description: 产品定稿降级/无归因文案，不得由客户端改写
+        causes:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+              description:
+                type: string
+              evidence:
+                type: object
+        suggestions:
+          type: array
+          items:
+            type: string
+        llm:
+          type: object
+          properties:
+            configured:
+              type: boolean
+            provider:
+              type: string
+              nullable: true
+            fallbackReason:
+              type: string
+              nullable: true
+            fallbackSource:
+              type: string
+              enum: [EVIDENCE, LLM]
+    WhatIfRequest:
+      type: object
+      required: [sandboxId, question]
+      properties:
+        sandboxId:
+          type: string
+          format: uuid
+          description: 必须是 WHAT_IF 场景；BASELINE/ARCHIVED 返回 422/42200
+        question:
+          type: string
+          maxLength: 2000
+        parameters:
+          type: object
+          description: >-
+            仅支持 orderNos/strategyId/engine/timeoutSeconds/moveThreadCount/acceptor/randomSeed/
+            maxSteps/unimprovedSecondsSpentLimit/direction/useFrozenAssignments；
+            其他键返回 422/42200 并逐一点名。
+    WhatIfResult:
+      type: object
+      description: C45：方案对比（复用沙箱 compare），非单方案结果；不展示置信度。
+      properties:
+        sandboxId:
+          type: string
+          format: uuid
+        baselineSandboxId:
+          type: string
+          format: uuid
+          description: 服务端固定取当前租户唯一 BASELINE 场景；请求不提供该入参
+        baselineTaskCount:
+          type: integer
+          format: int64
+          description: 基线场景实测任务数
+        afterTaskCount:
+          type: integer
+          format: int64
+          description: 对比侧（WHAT_IF 场景）实测任务数
+        baselineEmpty:
+          type: boolean
+          description: 基线任务数为 0
+        comparisonWarnings:
+          type: array
+          description: >-
+            基线可比性警告；空数组表示未发现不可比情形。BASELINE_EMPTY=基线无任务，差值不可解释；
+            BASELINE_NOT_SCHEDULED=基线有任务但无可用排程时间；BASELINE_SPARSE=对比侧任务数≥基线 3 倍。
+          items:
+            type: string
+            enum: [BASELINE_EMPTY, BASELINE_NOT_SCHEDULED, BASELINE_SPARSE]
+        question:
+          type: string
+        appliedChanges:
+          type: array
+          items:
+            type: object
+            properties:
+              parameter:
+                type: string
+              value:
+                nullable: true
+        solveTaskId:
+          type: integer
+          format: int64
+        solveStatus:
+          type: string
+        solveDegraded:
+          type: boolean
+        scoreHard:
+          type: integer
+          format: int64
+          nullable: true
+        scoreSoft:
+          type: integer
+          format: int64
+          nullable: true
+        metrics:
+          type: object
+        available:
+          type: boolean
+        unavailableReason:
+          type: string
+          nullable: true
+        comparison:
+          type: object
+          description: 与 C32 沙箱 compare 同结构（前/后差异）
+        impactedOrders:
+          type: array
+          items:
+            type: string
+        impactedOrdersComplete:
+          type: boolean
+        bottleneckChange:
+          type: object
+          description: 瓶颈资源变化；comparable=false 时 changed 不代表“未变化”
+          properties:
+            before:
+              type: object
+              nullable: true
+              properties:
+                resourceCode:
+                  type: string
+                utilization:
+                  type: number
+            after:
+              type: object
+              nullable: true
+              properties:
+                resourceCode:
+                  type: string
+                utilization:
+                  type: number
+            comparable:
+              type: boolean
+            notComparableReason:
+              type: string
+              nullable: true
+              enum: [BASELINE_NO_RESOURCE_UTILIZATION, AFTER_NO_RESOURCE_UTILIZATION]
+            changed:
+              type: boolean
+              description: 仅在 comparable=true 时判定：资源编码不同或利用率变化 ≥ 0.01
+            metric:
+              type: string
+            resourceDeltas:
+              type: array
+              items:
+                type: object
+                properties:
+                  resourceCode:
+                    type: string
+                  before:
+                    type: number
+                  after:
+                    type: number
+                  delta:
+                    type: number
+        answer:
+          type: string
+          description: 确定性摘要；求解失败时为产品定稿降级文案
+        source:
+          type: string
+          enum: [EVIDENCE, LLM]
+    ResultOfSolveTaskDetail:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/SolveTaskDetail'
+    IncrementalSolveResult:
+      type: object
+      required: [planId, solveTaskId, baseSolveTaskId, sandboxId, affectedOrderCount, orderNos,
+                 skippedLockedTaskCount, solveTask]
+      properties:
+        planId:
+          type: string
+          format: uuid
+          description: 新建的 DRAFT plan_version.id（对外 planId）
+        solveTaskId:
+          type: integer
+          format: int64
+          description: 新求解任务主键
+        baseSolveTaskId:
+          type: integer
+          format: int64
+          description: 基准求解任务主键
+        sandboxId:
+          type: string
+          format: uuid
+        affectedOrderCount:
+          type: integer
+          description: 参与重排的订单数
+        orderNos:
+          type: array
+          items:
+            type: string
+          description: 参与重排的订单号
+        skippedLockedTaskCount:
+          type: integer
+          description: 因锁定/冻结被跳过的任务数
+        solveTask:
+          $ref: '#/components/schemas/SolveTaskDetail'
+    ResultOfIncrementalSolveResult:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/IncrementalSolveResult'
+    ResultOfNlToDsl:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/NlToDslResult'
+    ResultOfExplain:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ExplainResult'
+    ResultOfWhatIf:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/WhatIfResult'
+    InfeasibilityVerdict:
+      type: string
+      x-contract-id: C51
+      enum: [NO_FEASIBLE_SOLUTION_FOUND, NO_EVIDENCE, PARTIAL_EVIDENCE]
+      description: 禁止 INFEASIBLE_PROVEN；NO_FEASIBLE_SOLUTION_FOUND 表示当前题面/约束/168h 视野下存在必然矛盾，不是数学意义上的永不可行
+    InfeasibilityReasonCode:
+      type: string
+      x-contract-id: C51
+      enum: [UNASSIGNED, NO_ROUTING, NO_RESOURCE, RESOURCE_WINDOW_SHORT, FROZEN_CONFLICT,
+             HORIZON_EXCEEDED, MATERIAL_MISSING, OTHER]
+    InfeasibilityLlmStatus:
+      type: string
+      x-contract-id: C51
+      enum: [DISABLED, OK, FALLBACK]
+    InfeasibilityBlockingTask:
+      type: object
+      x-contract-id: C51
+      properties:
+        taskId:
+          type: integer
+          format: int64
+          nullable: true
+          description: 已落库任务才有；缺失路由等场景为 null
+        orderNo:
+          type: string
+        operation:
+          type: string
+          nullable: true
+        operationIndex:
+          type: integer
+          nullable: true
+        reasonCode:
+          $ref: '#/components/schemas/InfeasibilityReasonCode'
+        reason:
+          type: string
+          description: 确定性中文说明，事实部分不得由 LLM 改写
+    InfeasibilityConflictPair:
+      type: object
+      x-contract-id: C51
+      properties:
+        taskA:
+          type: integer
+          format: int64
+        taskB:
+          type: integer
+          format: int64
+        resourceId:
+          type: string
+          format: uuid
+        overlapStart:
+          type: string
+          format: date-time
+        overlapEnd:
+          type: string
+          format: date-time
+    InfeasibilityResourceWindow:
+      type: object
+      x-contract-id: C51
+      properties:
+        resourceId:
+          type: string
+          format: uuid
+        windowStart:
+          type: string
+          format: date-time
+        windowEnd:
+          type: string
+          format: date-time
+        requiredHours:
+          type: number
+        gapHours:
+          type: number
+          minimum: 0
+    InfeasibilityViolatedRule:
+      type: object
+      x-contract-id: C51
+      properties:
+        ruleCode:
+          type: string
+        constraintName:
+          type: string
+        deduction:
+          type: number
+        count:
+          type: integer
+    InfeasibilityReport:
+      type: object
+      x-contract-id: C51
+      description: 求解不可行证据；失败/超时任务同样可查，数组每类最多 8 条
+      properties:
+        solveTaskId:
+          type: integer
+          format: int64
+        verdict:
+          $ref: '#/components/schemas/InfeasibilityVerdict'
+        blockingTasks:
+          type: array
+          maxItems: 8
+          items:
+            $ref: '#/components/schemas/InfeasibilityBlockingTask'
+        conflictPairs:
+          type: array
+          maxItems: 8
+          items:
+            $ref: '#/components/schemas/InfeasibilityConflictPair'
+        resourceWindows:
+          type: array
+          maxItems: 8
+          items:
+            $ref: '#/components/schemas/InfeasibilityResourceWindow'
+        violatedRules:
+          type: array
+          maxItems: 8
+          items:
+            $ref: '#/components/schemas/InfeasibilityViolatedRule'
+        assumptions:
+          type: array
+          items:
+            type: string
+        generatedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: NO_EVIDENCE 时必须为 null；其余 verdict 非空
+        solverRunId:
+          type: string
+          nullable: true
+        candidateSeed:
+          type: integer
+          format: int64
+          nullable: true
+        truncated:
+          type: boolean
+        narrative:
+          type: string
+          nullable: true
+          description: NO_EVIDENCE 时为 null；LLM 只改写，不覆盖事实
+        llmStatus:
+          $ref: '#/components/schemas/InfeasibilityLlmStatus'
+    ResultOfInfeasibilityReport:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/InfeasibilityReport'
+    CounterfactualKind:
+      type: string
+      x-contract-id: C52
+      enum: [EXTEND_CALENDAR, ADD_RESOURCE, UNFREEZE_TASKS, RELAX_DUE_DATE, SPLIT_BATCH, SUBSTITUTE_MATERIAL]
+    CounterfactualStatus:
+      type: string
+      x-contract-id: C52
+      enum: [VERIFIED_FEASIBLE, STILL_INFEASIBLE, UNVERIFIED, OUT_OF_BUDGET]
+    CounterfactualRequest:
+      type: object
+      x-contract-id: C52
+      required: [kind, params]
+      properties:
+        kind:
+          $ref: '#/components/schemas/CounterfactualKind'
+        params:
+          type: object
+          additionalProperties: true
+          description: |
+            kind 相关参数。EXTEND_CALENDAR: resourceId/from/to；ADD_RESOURCE: resourceCode/resourceType；
+            UNFREEZE_TASKS: taskIds；RELAX_DUE_DATE: orderNos/days；SPLIT_BATCH: orderNo/batchCount；
+            SUBSTITUTE_MATERIAL: materialCode/substituteCode。
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 5
+    CounterfactualChange:
+      type: object
+      x-contract-id: C52
+      properties:
+        taskId:
+          type: integer
+          format: int64
+        orderNo:
+          type: string
+        operationIndex:
+          type: integer
+        resourceCode:
+          type: string
+          nullable: true
+        startTime:
+          type: string
+          format: date-time
+          nullable: true
+        endTime:
+          type: string
+          format: date-time
+          nullable: true
+    CounterfactualSolver:
+      type: object
+      x-contract-id: C52
+      properties:
+        engine:
+          type: string
+        seed:
+          type: integer
+          format: int64
+          nullable: true
+        hardScore:
+          type: number
+          nullable: true
+        softScore:
+          type: number
+          nullable: true
+        durationMs:
+          type: integer
+          format: int64
+        terminationReason:
+          type: string
+    CounterfactualResult:
+      type: object
+      x-contract-id: C52
+      description: 只读验证结果；mainPlanWritten 恒为 false，不写任何计划
+      properties:
+        solveTaskId:
+          type: integer
+          format: int64
+        kind:
+          $ref: '#/components/schemas/CounterfactualKind'
+        status:
+          $ref: '#/components/schemas/CounterfactualStatus'
+        feasible:
+          type: boolean
+          description: 仅 VERIFIED_FEASIBLE 为 true；其余一律 false
+        affectedTaskCount:
+          type: integer
+        unassignedTaskCount:
+          type: integer
+          nullable: true
+          description: UNVERIFIED/OUT_OF_BUDGET 为 null
+        changes:
+          type: array
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/CounterfactualChange'
+        truncated:
+          type: boolean
+        solver:
+          allOf:
+            - $ref: '#/components/schemas/CounterfactualSolver'
+          nullable: true
+        evidence:
+          allOf:
+            - $ref: '#/components/schemas/InfeasibilityReport'
+          nullable: true
+          description: 仅 STILL_INFEASIBLE 非空
+        assumptions:
+          type: array
+          items:
+            type: string
+        narrative:
+          type: string
+          nullable: true
+        message:
+          type: string
+          nullable: true
+        generatedAt:
+          type: string
+          format: date-time
+        mainPlanWritten:
+          type: boolean
+          description: 恒为 false
+    ResultOfCounterfactualResult:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/CounterfactualResult'
+    EngineFallbackReason:
+      type: string
+      x-contract-id: C28
+      enum: [TIMEOUT, ENGINE_ERROR, SOLVER_UNAVAILABLE, SOLVER_BUSY]
+      description: |
+        C28 降级原因闭集。TIMEOUT/ENGINE_ERROR/SOLVER_UNAVAILABLE 属环境/引擎侧失败，可重试；
+        SOLVER_BUSY 是求解槽位等待超时的容量拒绝，不可重试，应由调用方稍后重投。
+    EngineFallbackDetail:
+      type: string
+      x-contract-id: C28
+      enum: [ORTOOLS_NOT_ENABLED, LOCK_CONTENTION, SOLVER_NOT_ASSEMBLED, SOLVER_TIMEOUT, ENGINE_EXCEPTION]
+      description: |
+        C28 降级成因闭集（给运维）；仅降级时出现。LOCK_CONTENTION 对应容量争用，
+        与 engineFallbackReason=SOLVER_BUSY 配对，不得与 ENGINE_EXCEPTION 混用。
+    SolveScorePoint:
+      type: object
+      x-contract-id: C54
+      description: 沿用 solver-api ScorePoint；社区版 step 固定 0
+      properties:
+        elapsedMs:
+          type: integer
+          format: int64
+        step:
+          type: integer
+        hardScore:
+          type: number
+        softScore:
+          type: number
+    SolvePortfolioCandidateStatus:
+      type: string
+      x-contract-id: C54
+      enum: [SUCCEEDED, FAILED, TIMEOUT, REJECTED]
+    SolvePortfolioFailureReason:
+      type: string
+      x-contract-id: C54
+      enum: [SOLVER_BUSY, TIMEOUT, OOM, ENGINE_ERROR, REJECTED_BY_ADMISSION]
+    SolvePortfolioDegradedReason:
+      type: string
+      x-contract-id: C54
+      enum: [DISABLED, TASK_SCALE, CPU_BUDGET, MEMORY_BUDGET, SOLVER_BUSY, QUEUE_FULL, CONFIG_ERROR, OOM, UNKNOWN]
+    SolvePortfolioCandidate:
+      type: object
+      x-contract-id: C54
+      properties:
+        profile:
+          type: string
+        seed:
+          type: integer
+          format: int64
+        status:
+          $ref: '#/components/schemas/SolvePortfolioCandidateStatus'
+        durationMs:
+          type: integer
+          format: int64
+          nullable: true
+          description: REJECTED 未启动求解时为 null
+        hardScore:
+          type: number
+          nullable: true
+        softScore:
+          type: number
+          nullable: true
+        terminationReason:
+          type: string
+          nullable: true
+        winner:
+          type: boolean
+        failureReason:
+          allOf:
+            - $ref: '#/components/schemas/SolvePortfolioFailureReason'
+          nullable: true
+    SolvePortfolioObservation:
+      type: object
+      x-contract-id: C54
+      description: SolveTaskDetail.metrics.portfolio；portfolio 关闭时该键不存在
+      properties:
+        enabled:
+          type: boolean
+        candidateCount:
+          type: integer
+        winnerProfile:
+          type: string
+          nullable: true
+        degraded:
+          type: boolean
+        degradedReason:
+          allOf:
+            - $ref: '#/components/schemas/SolvePortfolioDegradedReason'
+          nullable: true
+        slotWaitMs:
+          type: integer
+          format: int64
+          nullable: true
+        candidates:
+          type: array
+          maxItems: 8
+          items:
+            $ref: '#/components/schemas/SolvePortfolioCandidate'
+        timeToBestMs:
+          type: integer
+          format: int64
+          nullable: true
+        scoreTimeline:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/SolveScorePoint'
+        truncated:
+          type: boolean
+        generatedAt:
+          type: string
+          format: date-time

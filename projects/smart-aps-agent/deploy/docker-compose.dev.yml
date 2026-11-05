@@ -1,0 +1,181 @@
+# =============================================================================
+# APS 本地开发依赖栈（P0-06）
+#   PostgreSQL 15 / Redis 7 / MinIO
+#
+# 启动方式（推荐，脚本会做环境检查 + .env 兜底复制 + 端口检查）：
+#   PowerShell : .\scripts\dev-up.ps1
+#   Bash       : ./scripts/dev-up.sh
+# 手动启动：
+#   docker compose --env-file .env -f deploy/docker-compose.dev.yml up -d --wait
+#
+# 端口策略（对齐 aps-arch-page 5.1）：
+#   默认不向宿主机发布任何端口，仅 aps-net 内部网络互通；
+#   需要在宿主机（IDE）直连调试时，叠加 docker-compose.dev.expose.yml，
+#   届时只绑定 127.0.0.1（见该文件）。
+#
+# 镜像说明：postgres:15 / redis:7 为官方稳定主版本 tag；
+#   MinIO 官方社区镜像已从 Docker Hub 下架、quay.io 仓库需要授权（2025 年起），
+#   因此默认使用同一 MinIO 代码线的社区维护分支 pgsty/minio 的固定 RELEASE tag，
+#   可通过 MINIO_IMAGE 覆盖为内网仓库/自建镜像。详见 docs/deploy/local-dev.md。
+# =============================================================================
+
+name: ${COMPOSE_PROJECT_NAME:-aps-dev}
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 15：业务库；首次初始化自动创建 pgcrypto / pg_trgm 扩展
+  # 业务表结构由后端 Flyway（db/migration）管理，本栈不建表
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:15
+    container_name: aps-dev-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aps}
+      POSTGRES_USER: ${POSTGRES_USER:-aps}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required, copy .env.example to .env first}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+      PGDATA: /var/lib/postgresql/data/pgdata
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - max_connections=100
+      - -c
+      - log_min_duration_statement=1000
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    expose:
+      - "5432"
+    networks:
+      - aps-net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -h 127.0.0.1 -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    stop_grace_period: 30s
+    shm_size: 256mb
+
+  # ---------------------------------------------------------------------------
+  # Redis 7：缓存 + Redis Stream 事件总线（MVP 用它替代 RabbitMQ）
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7
+    container_name: aps-dev-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required, copy .env.example to .env first}
+      TZ: Asia/Shanghai
+    # 密码通过 --requirepass 传入（本地开发可接受；生产改用 ACL/secret 注入）
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --requirepass
+      - ${REDIS_PASSWORD}
+    volumes:
+      - redisdata:/data
+    expose:
+      - "6379"
+    networks:
+      - aps-net
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli -h 127.0.0.1 -p 6379 -a "$$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # MinIO：附件对象存储（图纸、贴片程序、钢网照片）
+  # 9000 = S3 API，9001 = Web Console；两者默认仅内网
+  # ---------------------------------------------------------------------------
+  minio:
+    image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z}
+    container_name: aps-dev-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-apsminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required, copy .env.example to .env first}
+      TZ: Asia/Shanghai
+    command:
+      - server
+      - /data
+      - --address
+      - :9000
+      - --console-address
+      - :9001
+    volumes:
+      - miniodata:/data
+    expose:
+      - "9000"
+      - "9001"
+    networks:
+      - aps-net
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -fsS
+        - http://127.0.0.1:9000/minio/health/live
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    stop_grace_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # 一次性初始化：等待 MinIO 健康后创建附件桶（体现依赖顺序）
+  # 复用 minio 镜像内置的 mc 客户端，不额外引入镜像
+  # ---------------------------------------------------------------------------
+  minio-init:
+    image: ${MINIO_IMAGE:-pgsty/minio:RELEASE.2026-08-04T00-00-00Z}
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-apsminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required, copy .env.example to .env first}
+      MINIO_BUCKET: ${MINIO_BUCKET:-aps-attachments}
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - |
+        set -eu
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null
+        mc mb --ignore-existing "local/$$MINIO_BUCKET" >/dev/null
+        echo "[minio-init] bucket ready: $$MINIO_BUCKET"
+    networks:
+      - aps-net
+
+networks:
+  aps-net:
+    driver: bridge
+    name: ${COMPOSE_PROJECT_NAME:-aps-dev}-aps-net
+
+volumes:
+  pgdata:
+    name: ${COMPOSE_PROJECT_NAME:-aps-dev}-pgdata
+  redisdata:
+    name: ${COMPOSE_PROJECT_NAME:-aps-dev}-redisdata
+  miniodata:
+    name: ${COMPOSE_PROJECT_NAME:-aps-dev}-miniodata

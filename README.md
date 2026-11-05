@@ -15,8 +15,9 @@ projects/mfg-agent/web/        # 智造协同平台前端 → /demo/mfg/
 projects/mfg-agent/api/        # 智造协同平台后端（FastAPI）
 projects/hogo-qa/frontend/     # SPC 质量分析工具前端（React + Vite）
 projects/hogo-qa/backend/      # SPC 质量分析工具后端（零依赖 Node 服务）
-deploy/hk-web/                 # 香港：Nginx + certbot + hogo-qa 的 compose
-deploy/gz-api/                 # 广州：FastAPI + Redis 的 compose
+projects/smart-aps-agent/      # 智能 APS 排产平台（Vue3 + Spring Boot + PostgreSQL）→ /demo/mfg-agent-platform/
+deploy/hk-web/                 # 香港：Nginx + certbot + hogo-qa / smart-aps 前端的 compose
+deploy/gz-api/                 # 广州：FastAPI + APS 后端 + PostgreSQL 的 compose
 docs/                          # 架构与改造记录
 ```
 
@@ -29,6 +30,8 @@ docs/                          # 架构与改造记录
 | `/demo/` | Demo 总目录 | 香港 `site/public/demo/` |
 | `/demo/mfg/` | 智造协同平台在线 Demo | 香港 alias → `projects/mfg-agent/web/` |
 | `/demo/hogo-qa/` | SPC 质量分析工具在线版 | 香港反代 → 本机 `hogo-qa` 容器 `:8788` |
+| `/demo/mfg-agent-platform/` | 智能 APS 排产平台在线 Demo | 香港反代 → 本机 `smart-aps-frontend` 容器 `:8080` → 广州 APS 后端 `:8085` |
+| `/demo/mfg-agent-platform/api/*` | APS 接口与 STOMP WebSocket | 香港 → 本机 APS 前端容器 → 广州 `:8085` |
 | `/api/*` | 智造协同平台接口与 SSE | 香港反代 → 广州 `:8004` |
 
 ## 分支与发布
@@ -98,7 +101,7 @@ docker compose -f deploy/gz-api/docker-compose.yml logs -f app
 > 若 `git pull` 报 diverged（仓库提交历史在 2026-10 整理过，服务器是旧历史的克隆），
 > 执行一次 `git fetch origin` + `git reset --hard origin/main` 对齐即可——服务器上没有本地改动。
 
-## 香港部署（静态站 + hogo-qa）
+## 香港部署（静态站 + hogo-qa / APS 前端）
 
 拉取命令见上一节。首次部署要准备密钥文件并签发证书：
 
@@ -107,6 +110,12 @@ cp deploy/hk-web/.env.example deploy/hk-web/.env   # 必改 HOGO_AUTH_PASSWORD
 ```
 
 证书签发步骤见 [deploy/hk-web/README.md](deploy/hk-web/README.md)。
+
+APS 前端由 `deploy/hk-web/docker-compose.yml` 的 `smart-aps-frontend` 服务在 `git pull` 后
+`up -d --build` 构建（Vue 3 + Vite，构建参数把 `base`、接口前缀、WS 前缀统一为
+`/demo/mfg-agent-platform/`）。它只在内网暴露 `8080`，由 Nginx 反代；`/api` 与 `/ws` 再由容器
+转发到广州 `:8085`，不会占用站点根路径的 `/api/*`。如需改后端地址，在香港 `.env` 里设置
+`APS_BACKEND_URL`。
 
 ## 广州部署（API）
 
@@ -119,7 +128,23 @@ docker compose up -d --build
 docker compose logs -f app
 ```
 
-广州 `8004` 必须在**云安全组**里只放行香港 IP（`43.132.214.124/32`）。
+APS 后端（`aps-postgres` + `aps-backend`）随同一个 compose 启动，首次构建会下载 Maven 依赖，
+耗时明显长于 FastAPI；默认通过 `APS_MAVEN_MIRROR_URL`（阿里云公共仓库）加速，也可在 `.env` 覆盖。
+首次启动由 Flyway 建 28 张表；如需演示数据，再导入 M1 种子（幂等）：
+
+```bash
+docker compose exec -T aps-postgres psql -U aps -d aps < aps-seed-m1.sql
+```
+
+APS 的 JWT 密钥、数据库口令、admin 首启口令与安全模式都可以在 `deploy/gz-api/.env` 覆盖：
+`APS_SECURITY_JWT_SECRET`、`APS_DB_PASSWORD`、`APS_ADMIN_INIT_PASSWORD`、`APS_SECURITY_MODE`。
+默认安全模式为 `prod`（所有接口需登录），演示账号 `admin`，首启口令默认 `ApsDemo2026`，
+**上线前务必覆盖**。
+
+> 资源提示：广州 4C4G 上 `mfg-agent` 已占 2.8G，APS 后端 700m + PostgreSQL 256m 属于紧平衡。
+> 若 `docker stats` 显示频繁 OOM，优先临时停 `mfg-agent` 或升级到 8G，不要同时压缩两个服务的堆。
+
+广州 `8004`（mfg）与 `8085`（APS）必须在**云安全组**里只放行香港 IP（`43.132.214.124/32`）。
 Docker 的 `-p` 会绕过 ufw，宿主机防火墙拦不住。
 
 ## 演示数据与密钥

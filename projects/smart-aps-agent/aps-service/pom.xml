@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.hengce.aps</groupId>
+        <artifactId>mfg-aps-platform</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>aps-service</artifactId>
+    <name>aps-service</name>
+    <description>业务服务层：编排领域模型、仓储与求解器抽象</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>aps-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>aps-domain</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>aps-infrastructure</artifactId>
+        </dependency>
+        <!-- V05-01 Agent 框架：explain 需要 LlmGateway / agent_run 记录；aps-agent 仅依赖 aps-common，无环路 -->
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>aps-agent</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>solver-api</artifactId>
+        </dependency>
+        <!-- 约束 DSL 解析/校验/编译（M2-SE-02）；版本由根 pom 的 dependencyManagement 统一管理 -->
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>solver-dsl</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-context</artifactId>
+        </dependency>
+        <!-- 日历请求 DTO 使用 Jakarta Validation 注解；版本由根 pom 统一管理 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <!-- C30 登录口令 bcrypt：仅用 crypto 模块，不引入完整 Spring Security 过滤链；
+             版本由 Spring Boot BOM 统一管理 -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
+        </dependency>
+        <!-- Excel 导入导出（M2-BD-05）：POI 负责 xlsx 模板生成与解析；版本由根 pom 的
+             dependencyManagement（poi.version=5.3.0）统一管理 -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 真库集成测试：本机/CI 便携 PostgreSQL 驱动，仅测试作用域 -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 真库测试上下文与生产装配对齐：JacksonAutoConfiguration 依赖 spring-web 提供的
+             Jackson2ObjectMapperBuilder 才会创建 ObjectMapper bean；生产由 aps-web（starter-web）
+             引入，服务层测试类路径缺失，此处仅测试作用域补齐 -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-web</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- 真库集成测试自行把迁移跟到最新（含新增 V11），复用仓库根 db/migration；
+             仅测试作用域，不改变生产装配 -->
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+            <version>${flyway.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-database-postgresql</artifactId>
+            <version>${flyway.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- C52/C53 验证求解接缝的真实 Timefold 样本测试；仅测试作用域，
+             生产装配仍由 aps-admin 引入 -->
+        <dependency>
+            <groupId>com.hengce.aps</groupId>
+            <artifactId>solver-timefold</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

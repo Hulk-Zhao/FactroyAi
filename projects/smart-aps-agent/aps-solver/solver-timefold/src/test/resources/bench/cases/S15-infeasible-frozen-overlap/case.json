@@ -1,0 +1,57 @@
+{
+    "caseId":  "S15-infeasible-frozen-overlap",
+    "kind":  "INFEASIBLE",
+    "sizeClass":  "SMALL",
+    "tags":  [
+                 "infeasible",
+                 "frozen"
+             ],
+    "seed":  0,
+    "budget":  {
+                   "timeoutSeconds":  3,
+                   "unimprovedSecondsSpentLimit":  2,
+                   "maximumStepCount":  0
+               },
+    "problem":  {
+                    "anchor":  "2026-01-05T00:00:00",
+                    "orders":  3,
+                    "operationsPerOrder":  2,
+                    "ordersWithoutRouting":  0,
+                    "resources":  1,
+                    "secondaryResources":  0,
+                    "secondaryWindowHours":  0,
+                    "qty":  12,
+                    "standardSeconds":  600,
+                    "setupSeconds":  600,
+                    "dueOffsetDays":  [
+                                          1,
+                                          2,
+                                          3
+                                      ],
+                    "priorityCycle":  [
+                                          "NORMAL",
+                                          "HIGH",
+                                          "URGENT"
+                                      ],
+                    "familyCycle":  [
+                                        "FAM-A",
+                                        "FAM-B"
+                                    ],
+                    "calendar":  "NONE",
+                    "setupMatrix":  "NONE",
+                    "frozenCount":  2,
+                    "frozenOverlap":  true,
+                    "frozenStartHourOffset":  8,
+                    "initialOrders":  0,
+                    "initialStartHourOffset":  8,
+                    "explicitDependencies":  false,
+                    "allTasksSecondary":  true
+                },
+    "expectation":  {
+                        "status":  "INFEASIBLE",
+                        "hardScoreAtMost":  -1,
+                        "expectedHardCodes":  [
+                                                  "resourceNoOverlap"
+                                              ]
+                    }
+}

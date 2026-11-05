@@ -1,0 +1,3228 @@
+openapi: 3.0.3
+info:
+  title: 衡策 APS - 物料与主数据 API
+  version: 0.1.0
+  description: |
+    materials 分组静态契约（P0-08）。统一返回体、分页、幂等、时间格式与错误码见
+    ../../docs/api/conventions.md。标注 placeholder 的端点当前返回 501 / code=50100。
+servers:
+  - url: /api/v1
+tags:
+  - name: 物料
+  - name: BOM
+  - name: 资源
+  - name: 日历
+  - name: 工艺路线
+  - name: MRP
+  - name: 换型矩阵
+paths:
+  /materials:
+    get:
+      operationId: listMaterials
+      tags: [物料]
+      summary: 物料列表
+      description: |
+        状态：已实现。分页查询物料。
+        筛选语义：`code` 与 `name` 为模糊匹配（contains，忽略大小写），两者之间为 **OR**；
+        与 `type`、`categoryId` 等其他条件之间为 **AND**。
+        即「关键字同时传 code、name」时命中任一即可，不会因两者同时传而互相排除。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - name: code
+          in: query
+          required: false
+          description: 物料编码，模糊匹配（contains，忽略大小写）；与 name 之间为 OR
+          schema:
+            type: string
+            maxLength: 64
+        - name: name
+          in: query
+          required: false
+          description: 物料名称，模糊匹配（contains，忽略大小写）；与 code 之间为 OR
+          schema:
+            type: string
+            maxLength: 128
+        - name: type
+          in: query
+          required: false
+          description: 物料类型，精确匹配；与其他条件 AND
+          schema:
+            $ref: '#/components/schemas/MaterialType'
+        - name: categoryId
+          in: query
+          required: false
+          description: 物料分类 UUID，精确匹配；与其他条件 AND
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfMaterialPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    post:
+      operationId: createMaterial
+      tags: [物料]
+      summary: 创建物料
+      description: 状态：已实现。业务编码 code 全局唯一。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MaterialCreateRequest'
+      responses:
+        '200':
+          description: 成功，data 为新建物料
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfMaterial'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /materials/{code}:
+    parameters:
+      - name: code
+        in: path
+        required: true
+        description: 物料业务编码 material.code
+        schema:
+          type: string
+          maxLength: 64
+    get:
+      operationId: getMaterial
+      tags: [物料]
+      summary: 物料详情
+      description: 状态：已实现。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfMaterial'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    put:
+      operationId: updateMaterial
+      tags: [物料]
+      summary: 更新物料
+      description: 状态：已实现。需携带 version 做乐观锁校验。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MaterialUpdateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfMaterial'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    delete:
+      operationId: deleteMaterial
+      tags: [物料]
+      summary: 删除物料
+      description: 状态：已实现。逻辑删除，被 BOM/订单引用时拒绝。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /materials/import:
+    post:
+      operationId: importMaterials
+      tags: [物料]
+      summary: 导入物料
+      description: |
+        状态：代码已落地（ImportExportController#importFile，aps-web/src/main/java/com/hengce/aps/web/controller/importexport/ImportExportController.java:108-136）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。multipart/form-data，字段 file（Excel/CSV）。
+        本路径是 /{entity}/import 的旧别名（entity=materials），由同一处理方法承接。
+        参数以 §25.10 C39 为准：`mode=preview|execute|async` + `X-Import-Token`（C26 的 dryRun/Idempotency-Key 已废弃）。
+        同步模式返回 Result<ImportResult>；async 返回 202 + 裸 ImportJobView。
+      x-implementation-status: implemented
+      parameters:
+        - name: mode
+          in: query
+          required: false
+          description: preview（默认，只校验）/ execute（全量通过才落库）/ async（受理后后台执行）
+          schema:
+            type: string
+            enum: [preview, execute, async]
+            default: preview
+        - name: X-Import-Token
+          in: header
+          required: false
+          description: 幂等令牌，8-128 位；执行模式重复令牌返回首次结果（replayed=true）
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: 同步导入结果（data 为 ImportResult）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfImportResult'
+        '202':
+          description: 异步受理（裸 ImportJobView，不包 Result；字段见 import-export.yaml 的 `/{entity}/import` 202）
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /boms:
+    get:
+      operationId: listBoms
+      tags: [BOM]
+      summary: BOM 列表
+      description: |
+        状态：已实现。分页查询 BOM。
+        筛选条件之间为 **AND**；`parentMaterialCode` 精确匹配，`status` 精确匹配。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - name: parentMaterialCode
+          in: query
+          required: false
+          description: 父件物料编码，精确匹配 material.code
+          schema:
+            type: string
+            maxLength: 64
+        - name: status
+          in: query
+          required: false
+          description: BOM 状态，精确匹配；与 parentMaterialCode 等条件 AND
+          schema:
+            $ref: '#/components/schemas/BomStatus'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfBomPage'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    post:
+      operationId: createBom
+      tags: [BOM]
+      summary: 创建 BOM
+      description: 状态：已实现。同父件同版本不可重复。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BomCreateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfBom'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /boms/{bomId}:
+    get:
+      operationId: getBom
+      tags: [BOM]
+      summary: BOM 单条详情
+      description: |
+        状态：已实现。返回 BOM 头 + 完整 items；前端 BOM 详情不依赖列表行内 items。
+        路径参数为 BOM UUID（bom.id），不是父件编码。
+      x-implementation-status: implemented
+      parameters:
+        - name: bomId
+          in: path
+          required: true
+          description: BOM UUID（bom.id）
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功，data 为 BOM 头 + items
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfBom'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    delete:
+      operationId: deleteBom
+      tags: [BOM]
+      summary: 删除 BOM（逻辑删除）
+      description: |
+        状态：已实现。逻辑删除 BOM 头及其自身明细（items），不物理删除。
+        被 `orders.product_id` 或其他 BOM 子件行引用时返回 42200（HTTP 422）；不存在返回 40400（HTTP 404）。
+      x-implementation-status: implemented
+      parameters:
+        - name: bomId
+          in: path
+          required: true
+          description: BOM UUID（bom.id）
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功（无 data）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: BOM 被订单或其他 BOM 子件行引用（code=42200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+  /boms/{id}/tree:
+    get:
+      operationId: bomTree
+      tags: [BOM]
+      summary: BOM 树
+      description: 状态：已实现。默认展开 5 层，超过截断。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: BOM UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfBomTree'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /boms/{id}/activate:
+    post:
+      operationId: activateBom
+      tags: [BOM]
+      summary: 激活 BOM 版本
+      description: 状态：已实现。同一父件仅允许一个 ACTIVE 版本。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfBom'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /resources:
+    get:
+      operationId: listResources
+      tags: [资源]
+      summary: 资源列表
+      description: |
+        状态：已实现。分页查询资源。
+        筛选语义：`code` 与 `name` 为模糊匹配（contains，忽略大小写），两者之间为 **OR**；
+        与 `type`、`groupId` 之间为 **AND**。
+        分页上限：`size` 默认 20、最大 200，超限按 200；需要更多资源时用 `codes` 批量（≤200 个），
+        或按 page 递增取全量；甘特场景请直接用 C4 的 calendarId，不要枚举资源。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - name: codes
+          in: query
+          required: false
+          description: |
+            C27 批量取数：逗号分隔的资源 code（单次 ≤200）；存在时优先于 code/分页，
+            忽略 page/size，返回命中的全部资源，total=命中数。
+          schema:
+            type: string
+        - name: code
+          in: query
+          required: false
+          description: 资源编码，模糊匹配（contains，忽略大小写）；与 name 之间为 OR
+          schema:
+            type: string
+            maxLength: 64
+        - name: name
+          in: query
+          required: false
+          description: 资源名称，模糊匹配（contains，忽略大小写）；与 code 之间为 OR
+          schema:
+            type: string
+            maxLength: 128
+        - name: type
+          in: query
+          required: false
+          description: 资源类型，精确匹配；与其他条件 AND
+          schema:
+            $ref: '#/components/schemas/ResourceType'
+        - name: groupId
+          in: query
+          required: false
+          description: 资源组 UUID，精确匹配；与其他条件 AND
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfResourcePage'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    post:
+      operationId: createResource
+      tags: [资源]
+      summary: 创建资源
+      description: 状态：已实现。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResourceCreateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfResource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /resources/{code}:
+    get:
+      operationId: getResource
+      tags: [资源]
+      summary: 资源单条详情
+      description: 状态：已实现。路径参数为 resource.code（与 C6 一致）。
+      x-implementation-status: implemented
+      parameters:
+        - name: code
+          in: path
+          required: true
+          description: 资源编码 resource.code
+          schema:
+            type: string
+            maxLength: 64
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfResource'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    put:
+      operationId: updateResource
+      tags: [资源]
+      summary: 更新资源
+      description: |
+        状态：已实现。路径参数为 resource.code；`code` 不可修改。
+        乐观锁：必须携带当前 `version`，不一致返回 40901（HTTP 409）。
+      x-implementation-status: implemented
+      parameters:
+        - name: code
+          in: path
+          required: true
+          description: 资源编码 resource.code
+          schema:
+            type: string
+            maxLength: 64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResourceUpdateRequest'
+      responses:
+        '200':
+          description: 成功，返回更新后的资源（version 已递增）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfResource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 版本冲突（code=40901，HTTP 409）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    delete:
+      operationId: deleteResource
+      tags: [资源]
+      summary: 停用资源（软删除）
+      description: |
+        状态：已实现。将 `resource.deleted` 置为 true，不物理删除。
+        被日历（calendar.resource_id）或排产任务（task.resource_id）引用时返回 42200。
+        重复调用幂等，返回 200。
+      x-implementation-status: implemented
+      parameters:
+        - name: code
+          in: path
+          required: true
+          description: 资源编码 resource.code
+          schema:
+            type: string
+            maxLength: 64
+      responses:
+        '200':
+          description: 成功（无 data）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: 资源仍被日历或任务引用（code=42200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /resources/{code}/maintenance:
+    post:
+      operationId: maintainResource
+      tags: [资源]
+      summary: 设置资源维护计划
+      description: 状态：占位。维护窗口参与排程不可用计算。路径参数为 resource.code。
+      x-implementation-status: placeholder
+      parameters:
+        - name: code
+          in: path
+          required: true
+          description: 资源编码 resource.code
+          schema:
+            type: string
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MaintenanceRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfResource'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /calendars:
+    get:
+      operationId: listCalendars
+      tags: [日历]
+      summary: 日历列表
+      description: |
+        状态：已实现。分页查询日历。
+        筛选条件之间为 **AND**：`name` 模糊匹配（contains，忽略大小写），
+        `type`、`resourceId`、`resourceGroupId` 精确匹配。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - name: name
+          in: query
+          required: false
+          description: 日历名称，模糊匹配（contains，忽略大小写）
+          schema:
+            type: string
+            maxLength: 128
+        - name: type
+          in: query
+          required: false
+          description: 日历类型，精确匹配
+          schema:
+            $ref: '#/components/schemas/CalendarType'
+        - name: resourceId
+          in: query
+          required: false
+          description: 资源 UUID，精确匹配
+          schema:
+            type: string
+            format: uuid
+        - name: resourceGroupId
+          in: query
+          required: false
+          description: 资源组 UUID，精确匹配
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfCalendarPage'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    post:
+      operationId: createCalendar
+      tags: [日历]
+      summary: 创建日历
+      description: 状态：已实现。历史日历只读，通过新版本覆盖。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CalendarCreateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfCalendar'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /calendars/{id}:
+    get:
+      operationId: getCalendar
+      tags: [日历]
+      summary: 日历单条详情
+      description: |
+        状态：已实现。路径参数为 calendar UUID（calendar.id）。
+        对象结构见 C14/19.6：shifts 为工厂墙钟时间，按日历 timezone（缺省 aps.calendar.timezone，
+        默认 Asia/Shanghai）解释，禁止按浏览器本地时区判定；MAKEUP 日匹配不到班次时按"调休推定"沿用全部班次并标注。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 日历 UUID（calendar.id）
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfCalendar'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    put:
+      operationId: updateCalendar
+      tags: [日历]
+      summary: 更新日历
+      description: |
+        状态：已实现。路径参数为 calendar UUID（calendar.id）。
+        历史日历（`effectiveTo < 今天`）只读，更新返回 40300（HTTP 403）；`effectiveTo` 为空表示长期有效，可更新。
+        乐观锁：必须携带当前 `version`，不一致返回 40901（HTTP 409）。
+        `calendarVersion` 不可通过本接口修改；新版本请走创建接口。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 日历 UUID（calendar.id）
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CalendarUpdateRequest'
+      responses:
+        '200':
+          description: 成功，返回更新后的日历（version 已递增）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfCalendar'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: 历史日历只读（code=40300，HTTP 403）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 版本冲突（code=40901，HTTP 409）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    delete:
+      operationId: deleteCalendar
+      tags: [日历]
+      summary: 删除日历（软删除）
+      description: |
+        状态：已实现。将 `calendar.deleted` 置为 true，不物理删除。
+        本接口不区分历史日历；历史日历只读限制仅作用于 `PUT`（40300）。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 日历 UUID（calendar.id）
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功（无 data）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /calendars/{id}/available:
+    get:
+      operationId: availableWorkingTime
+      tags: [日历]
+      summary: 可用工时
+      description: 状态：占位。返回区间内可用时间片，扣除非工作日与维护窗口。
+      x-implementation-status: placeholder
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: from
+          in: query
+          required: true
+          description: ISO-8601 UTC
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: true
+          description: ISO-8601 UTC
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfAvailableTime'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /routings:
+    get:
+      operationId: listRoutings
+      tags: [工艺路线]
+      summary: 工艺路线列表
+      description: |
+        状态：代码已落地（RoutingController#list，aps-web/src/main/java/com/hengce/aps/web/controller/masterdata/RoutingController.java:80-91）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。分页查询工艺路线。
+        筛选条件之间为 **AND**：`productCode` 精确匹配 material.code，`version` 为业务版本号（routing_version），`status` 精确匹配。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - name: productCode
+          in: query
+          required: false
+          description: 产品物料编码，精确匹配 product_id → material.code
+          schema:
+            type: string
+            maxLength: 64
+        - name: version
+          in: query
+          required: false
+          description: 工艺路线业务版本号 routing_version（字符串，如 V1.0）
+          schema:
+            type: string
+            maxLength: 32
+        - name: status
+          in: query
+          required: false
+          description: 工艺路线状态，精确匹配
+          schema:
+            $ref: '#/components/schemas/RoutingStatus'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfRoutingPage'
+    post:
+      operationId: createRouting
+      tags: [工艺路线]
+      summary: 创建工艺路线
+      description: |
+        状态：代码已落地（RoutingController#create，aps-web/src/main/java/com/hengce/aps/web/controller/masterdata/RoutingController.java:115-120）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。工序节点构成 DAG，不允许环。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoutingCreateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfRouting'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /routings/{id}:
+    get:
+      operationId: getRouting
+      tags: [工艺路线]
+      summary: 工艺路线详情
+      description: |
+        状态：代码已落地（RoutingController#detail，aps-web/src/main/java/com/hengce/aps/web/controller/masterdata/RoutingController.java:101-105）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。返回 RoutingView（含 nodes/edges）。
+        域内 `/{id}` 已加正则排除 export/import 保留段（C38），导出路径按原路径使用即可。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfRouting'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      operationId: deleteRouting
+      tags: [工艺路线]
+      summary: 删除工艺路线
+      description: |
+        状态：代码已落地（RoutingController#delete，aps-web/src/main/java/com/hengce/aps/web/controller/masterdata/RoutingController.java:176-180）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。被订单/任务引用时返回 42200；响应 `data` 为 null。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功（data=null）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: 仍被订单或工艺路线节点引用（code=42200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+  /routings/{id}/graph:
+    get:
+      operationId: routingGraph
+      tags: [工艺路线]
+      summary: 工艺路线 DAG
+      description: |
+        状态：代码已落地（RoutingController#graph，aps-web/src/main/java/com/hengce/aps/web/controller/masterdata/RoutingController.java:129-132）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。边由 node UUID 映射为 fromSeqNo/toSeqNo。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfRoutingGraph'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: updateRoutingGraph
+      tags: [工艺路线]
+      summary: 保存工艺路线 DAG
+      description: |
+        状态：代码已落地（RoutingController#updateGraph，aps-web/src/main/java/com/hengce/aps/web/controller/masterdata/RoutingController.java:143-153）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。整体替换 nodes/edges；`nodes.edges` 为事实来源，同时刷新 routing.nodes/edges 快照。
+        约束：seqNo 在路线内唯一；边使用 fromSeqNo/toSeqNo；dependType 仅 FS/SS/FF；保存时做 DAG 环检测。
+        资源引用使用 `primaryResourceId`（UUID），不再接受 code；服务端校验资源存在。
+        `version` 必填用于乐观锁，不一致返回 40901。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 工艺路线 UUID（routing.id）
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoutingGraphUpdateRequest'
+      responses:
+        '200':
+          description: 成功，返回保存后的图
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfRoutingGraph'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 版本冲突（code=40901，HTTP 409）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '422':
+          description: DAG 有环、seqNo 重复、资源不存在或依赖类型非法（code=42200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+  /routings/{id}/activate:
+    post:
+      operationId: activateRouting
+      tags: [工艺路线]
+      summary: 激活工艺路线
+      description: |
+        状态：代码已落地（RoutingController#activate，aps-web/src/main/java/com/hengce/aps/web/controller/masterdata/RoutingController.java:163-166）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat；契约外补充）。同产品其他 ACTIVE 自动收敛；并发冲突 40901。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfRouting'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 并发激活冲突（code=40901）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /operation-templates:
+    get:
+      operationId: listOperationTemplates
+      tags: [工序模版]
+      summary: 工序模版列表
+      description: |
+        状态：已实现。供工艺路线编辑器选择模版。
+        筛选语义：`code` 与 `name` 为模糊匹配（contains，忽略大小写），两者之间为 **OR**；
+        与 `resourceType` 之间为 **AND**（resourceType 通过 primary_resource_id → resource.type 匹配）。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - $ref: '#/components/parameters/Sort'
+        - name: code
+          in: query
+          required: false
+          description: 模版编码，模糊匹配（contains，忽略大小写）；与 name 之间为 OR
+          schema:
+            type: string
+            maxLength: 64
+        - name: name
+          in: query
+          required: false
+          description: 模版名称，模糊匹配（contains，忽略大小写）；与 code 之间为 OR
+          schema:
+            type: string
+            maxLength: 256
+        - name: resourceType
+          in: query
+          required: false
+          description: 主资源类型，精确匹配；与其他条件 AND
+          schema:
+            $ref: '#/components/schemas/ResourceType'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOperationTemplatePage'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    post:
+      operationId: createOperationTemplate
+      tags: [工序模版]
+      summary: 创建工序模版
+      description: |
+        状态：已实现。创建新模版版本；`code` 由请求体指定（路径不含 code）。
+        同一 `tenant + code + templateVersion` 重复返回 40900。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OperationTemplateCreateRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOperationTemplate'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: 模版 code + templateVersion 重复（code=40900）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /operation-templates/{id}:
+    get:
+      operationId: getOperationTemplate
+      tags: [工序模版]
+      summary: 工序模版详情
+      description: 状态：已实现。路径参数为 operation_template UUID；同一 code 可有多个 templateVersion，禁止按 code 寻址详情。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 工序模版 UUID（operation_template.id）
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOperationTemplate'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    put:
+      operationId: updateOperationTemplate
+      tags: [工序模版]
+      summary: 更新工序模版
+      description: |
+        状态：已实现。`code` 与 `templateVersion` 不可修改；如需新版本请用 POST 创建。
+        `version` 必填用于乐观锁，不一致返回 40901。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 工序模版 UUID（operation_template.id）
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OperationTemplateUpdateRequest'
+      responses:
+        '200':
+          description: 成功，返回更新后的模版（version 已递增）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfOperationTemplate'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 版本冲突（code=40901）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+    delete:
+      operationId: deleteOperationTemplate
+      tags: [工序模版]
+      summary: 停用工序模版（软删除）
+      description: |
+        状态：已实现。将 `operation_template.deleted` 置为 true。
+        被 routing_node.operation_template_id 引用时返回 42200；重复调用幂等返回 200。
+      x-implementation-status: implemented
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: 工序模版 UUID（operation_template.id）
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 成功（无 data）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: 仍被工艺路线节点引用（code=42200）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
+  /inventory:
+    put:
+      operationId: upsertInventory
+      tags: [MRP]
+      summary: 批量写入库存
+      description: |
+        状态：代码与实现均已落地（InventoryController#upsert，aps-web/src/main/java/com/hengce/aps/web/controller/mrp/InventoryController.java:54-57）；
+        已制品级 HTTP 验收（2026-11-04 修复批次收口）。
+        验收证据：同一行连续两次 PUT（onHand 20 → 25）均 HTTP 200 / code 0 / data {"accepted":1,"rejected":0}；
+        响应外壳完整，且同一 (materialCode,warehouseCode) 仅更新、未重复插入（inventory 行数不变）。
+        修复说明：实现已由 {created,updated,total} 改为 C25 冻结的 {accepted, rejected}。
+        按 materialCode + warehouseCode upsert；snapshotAt 缺省当前 UTC。
+        物料不存在 40400；数量为负 42200；并发版本冲突 40901。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InventoryUpsertRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfInventoryUpsert'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /mrp/analysis:
+    post:
+      operationId: mrpAnalysis
+      tags: [MRP]
+      summary: MRP 齐套分析
+      description: |
+        状态：代码与实现均已落地（MrpController#analyze，aps-web/src/main/java/com/hengce/aps/web/controller/mrp/MrpController.java:67-70）；
+        已制品级 HTTP 验收（2026-11-04 修复批次收口）。
+        验收证据：HTTP 200 / code 0，status=SHORTAGE、blocked=true；shortages 原文含
+        "onHandQty":10.0,"transitQty":10.0,"safetyStock":5.0,"availableQty":15,"shortageQty":5，缺料 175 计算正确。
+        修复说明：修复批次已恢复 shortages 的 onHandQty/transitQty/safetyStock；
+        orders[] 使用 kitted/shortages，映射 `status ← kitted`、`shortageCount ← shortages.length`（冻结见 §25.16）。
+        C49 §25.24 增补订单级三态 kittingStatus 与 shortageItemCount/totalItemCount；kitted 原样保留。
+        shortages[] 增补 substitutes（来自 BOM 明细 substitutes JSONB）与 expectedArrival（来自 inventory_transit.expected_date），
+        supplierCode 取自物料主数据默认供应商。expectedArrival 晚于需求日时只作到货预告，不计入 transitQty。
+        blocking=true（默认）时，status != FULL 将阻止排产提交（42200 + 缺料明细）。
+        availableQty = onHandQty + transitQty - safetyStock（可为负）；shortageQty = requiredQty - max(availableQty, 0)。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MrpAnalysisRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfMrpAnalysis'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /mrp/suggestions:
+    x-milestone: M3
+    get:
+      operationId: mrpSuggestions
+      tags: [MRP]
+      summary: MRP 补料建议
+      description: |
+        状态：代码已落地（MrpController#suggestions，aps-web/src/main/java/com/hengce/aps/web/controller/mrp/MrpController.java:84-93）；
+        已制品级 HTTP 验收（2026-11-04，端口 18193 / 库 aps_verify_sysmat）。sandboxId 必填；orderNos 逗号分隔；horizonDays 1–365 默认 30；固定 materialCode ASC，sort 传值返回 40000。
+      x-implementation-status: implemented
+      parameters:
+        - name: sandboxId
+          in: query
+          required: true
+          description: 排产场景标识（UUID）
+          schema:
+            type: string
+            format: uuid
+        - name: orderNos
+          in: query
+          required: false
+          description: 逗号分隔的订单号，空表示全部可排产订单
+          schema:
+            type: string
+        - name: horizonDays
+          in: query
+          required: false
+          description: 需求时间窗口 1–365 天，默认 30
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 365
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfMrpSuggestionPage'
+  /setup-matrix:
+    x-milestone: V05-08
+    get:
+      operationId: listSetupMatrix
+      tags: [换型矩阵]
+      summary: 换型矩阵列表
+      description: |
+        状态：已实现（V05-08 / C44）。FROM/TO 产品-程序换型时间成组，支持默认值 + 同/跨系列特例，
+        生效范围 TENANT/RESOURCE_GROUP/RESOURCE。固定按 keyType、scopeType、created_at DESC 排序。
+      x-implementation-status: implemented
+      parameters:
+        - name: keyType
+          in: query
+          description: PRODUCT/PROGRAM（兼容 MATERIAL_CODE/OPERATION_CODE）
+          schema:
+            type: string
+        - name: scopeType
+          in: query
+          description: TENANT/RESOURCE_GROUP/RESOURCE
+          schema:
+            type: string
+        - name: resourceId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: resourceGroupId
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: fromKey
+          in: query
+          schema:
+            type: string
+        - name: toKey
+          in: query
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfSetupMatrixEntryPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    post:
+      operationId: createSetupMatrix
+      tags: [换型矩阵]
+      summary: 创建换型矩阵条目
+      description: |
+        状态：已实现（V05-08 / C44）。keyType 取值 PRODUCT/PROGRAM；
+        fromKey/toKey 为空表示通配默认；setupSeconds 必填；
+        业务键 (keyType, fromKey, toKey, scopeType, resourceId, resourceGroupId) 重复返回 409/40901。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetupMatrixRequest'
+      responses:
+        '200':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfSetupMatrixEntry'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /setup-matrix/{id}:
+    x-milestone: V05-08
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getSetupMatrix
+      tags: [换型矩阵]
+      summary: 换型矩阵详情
+      description: 状态：已实现（V05-08 / C44）。不存在返回 404/40400。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfSetupMatrixEntry'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: updateSetupMatrix
+      tags: [换型矩阵]
+      summary: 更新换型矩阵条目
+      description: |
+        状态：已实现（V05-08 / C44）。version 必填；版本冲突或业务键重复返回 409/40901。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetupMatrixRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfSetupMatrixEntry'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    delete:
+      operationId: deleteSetupMatrix
+      tags: [换型矩阵]
+      summary: 删除换型矩阵条目
+      description: 状态：已实现（V05-08 / C44）。软删除；不存在返回 404/40400。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 删除成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Result'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  parameters:
+    Page:
+      name: page
+      in: query
+      description: 页码，从 1 开始
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    Size:
+      name: size
+      in: query
+      description: 每页条数，默认 20，上限 200
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 20
+    Sort:
+      name: sort
+      in: query
+      description: field,asc|desc，多字段逗号分隔
+      schema:
+        type: string
+        example: code,asc
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: 幂等键，8-128 位 [A-Za-z0-9._:-]
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+  responses:
+    BadRequest:
+      description: 参数错误（code=40000）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    NotFound:
+      description: 资源不存在（code=40400）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Conflict:
+      description: 状态或幂等冲突（code=40900/40901）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Unprocessable:
+      description: 业务校验失败（code=42200）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Forbidden:
+      description: 禁止操作（code=40300，如历史日历只读）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    InternalError:
+      description: 系统错误（code=50000）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    NotImplemented:
+      description: 占位端点未实现（HTTP 501，code=50100）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+  schemas:
+    Result:
+      type: object
+      required: [code, message, traceId]
+      properties:
+        code:
+          type: integer
+          format: int32
+          example: 0
+        message:
+          type: string
+          example: success
+        data:
+          nullable: true
+        traceId:
+          type: string
+          example: 56a8a6223cc647898dc11403037d8477
+    MaterialType:
+      type: string
+      enum: [FINISHED, SEMI, RAW, AUX, PACK]
+    Material:
+      type: object
+      required: [code, name, type, unit]
+      properties:
+        code:
+          type: string
+          maxLength: 64
+        name:
+          type: string
+          maxLength: 128
+        type:
+          $ref: '#/components/schemas/MaterialType'
+        spec:
+          type: string
+        unit:
+          type: string
+          maxLength: 16
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        safetyStock:
+          type: number
+        moq:
+          type: number
+        leadTimeDays:
+          type: integer
+        defaultSupplierId:
+          type: string
+          format: uuid
+          nullable: true
+        extAttrs:
+          type: object
+          additionalProperties: true
+        industryAttrs:
+          type: object
+          additionalProperties: true
+        version:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    MaterialCreateRequest:
+      type: object
+      required: [code, name, type, unit]
+      properties:
+        code:
+          type: string
+          maxLength: 64
+        name:
+          type: string
+          maxLength: 128
+        type:
+          $ref: '#/components/schemas/MaterialType'
+        spec:
+          type: string
+        unit:
+          type: string
+        categoryId:
+          type: string
+          format: uuid
+          nullable: true
+        safetyStock:
+          type: number
+        moq:
+          type: number
+        leadTimeDays:
+          type: integer
+        defaultSupplierId:
+          type: string
+          format: uuid
+          nullable: true
+        extAttrs:
+          type: object
+        industryAttrs:
+          type: object
+    MaterialUpdateRequest:
+      allOf:
+        - $ref: '#/components/schemas/MaterialCreateRequest'
+        - type: object
+          required: [version]
+          properties:
+            version:
+              type: integer
+              description: 乐观锁版本
+    ImportResult:
+      type: object
+      description: 与 import-export.yaml 的 ImportResult 一致（ImportExportService#result 实际形状）。
+      required: [entity, mode, totalRows, validRows, invalidRows, inserted, updated, skipped, committed,
+                 replayed, errors, preview]
+      properties:
+        entity:
+          type: string
+        mode:
+          type: string
+          enum: [PREVIEW, EXECUTE]
+        totalRows:
+          type: integer
+        validRows:
+          type: integer
+        invalidRows:
+          type: integer
+        inserted:
+          type: integer
+        updated:
+          type: integer
+        skipped:
+          type: integer
+        committed:
+          type: boolean
+        replayed:
+          type: boolean
+        errors:
+          type: array
+          items:
+            type: object
+            required: [row, field, code, message]
+            properties:
+              row:
+                type: integer
+              field:
+                type: string
+              code:
+                type: integer
+              message:
+                type: string
+        preview:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+    ResultOfImportResult:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ImportResult'
+    BomStatus:
+      type: string
+      enum: [DRAFT, ACTIVE, INACTIVE]
+    BomItem:
+      type: object
+      required: [materialCode, qtyPerUnit]
+      properties:
+        materialCode:
+          type: string
+        qtyPerUnit:
+          type: number
+          minimum: 0
+        scrapRate:
+          type: number
+          minimum: 0
+          maximum: 1
+        position:
+          type: string
+        substitutes:
+          type: array
+          items:
+            type: string
+        isPhantom:
+          type: boolean
+    Bom:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        parentMaterialCode:
+          type: string
+        bomVersion:
+          type: string
+        effectiveDate:
+          type: string
+          format: date
+        expiryDate:
+          type: string
+          format: date
+          nullable: true
+        status:
+          $ref: '#/components/schemas/BomStatus'
+        isPanel:
+          type: boolean
+        panelSize:
+          type: integer
+          nullable: true
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BomItem'
+        version:
+          type: integer
+    BomCreateRequest:
+      type: object
+      required: [parentMaterialCode, bomVersion, effectiveDate, items]
+      properties:
+        parentMaterialCode:
+          type: string
+        bomVersion:
+          type: string
+        effectiveDate:
+          type: string
+          format: date
+        expiryDate:
+          type: string
+          format: date
+          nullable: true
+        isPanel:
+          type: boolean
+        panelSize:
+          type: integer
+          nullable: true
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/BomItem'
+    BomTreeNode:
+      type: object
+      properties:
+        bomId:
+          type: string
+          format: uuid
+        parentMaterialCode:
+          type: string
+        materialName:
+          type: string
+        qtyPerUnit:
+          type: number
+        level:
+          type: integer
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/BomTreeNode'
+    ResourceType:
+      type: string
+      enum: [PRIMARY, SECONDARY, HUMAN, TOOL]
+    CapacityMode:
+      type: string
+      enum: [UNIT_PER_HOUR, SECONDS_PER_UNIT, BATCH_SECONDS]
+    Resource:
+      type: object
+      description: |
+        资源对外用 code 寻址；响应体带 id，供 calendar.resourceId 等引用绑定。
+        M1 不引入 status 字段，停用统一用 resource.deleted（软删除），列表默认只返回未删除数据。
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: 资源 UUID（resource.id）
+        code:
+          type: string
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/ResourceType'
+        groupId:
+          type: string
+          format: uuid
+          nullable: true
+        capacityMode:
+          $ref: '#/components/schemas/CapacityMode'
+        capacityValue:
+          type: number
+        batchCapacity:
+          type: integer
+        efficiency:
+          type: number
+        calendarId:
+          type: string
+          format: uuid
+          nullable: true
+        setupSeconds:
+          type: integer
+        teardownSeconds:
+          type: integer
+        maintenancePlan:
+          type: object
+        industryAttrs:
+          type: object
+        version:
+          type: integer
+    ResourceCreateRequest:
+      type: object
+      required: [code, name, type, capacityMode, capacityValue]
+      properties:
+        code:
+          type: string
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/ResourceType'
+        groupId:
+          type: string
+          format: uuid
+          nullable: true
+        capacityMode:
+          $ref: '#/components/schemas/CapacityMode'
+        capacityValue:
+          type: number
+        batchCapacity:
+          type: integer
+        efficiency:
+          type: number
+        calendarId:
+          type: string
+          format: uuid
+          nullable: true
+        setupSeconds:
+          type: integer
+        teardownSeconds:
+          type: integer
+        industryAttrs:
+          type: object
+    ResourceUpdateRequest:
+      type: object
+      required: [version]
+      description: 仅更新传入字段；code 不可修改；version 必填用于乐观锁。
+      properties:
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/ResourceType'
+        groupId:
+          type: string
+          format: uuid
+          nullable: true
+        capacityMode:
+          $ref: '#/components/schemas/CapacityMode'
+        capacityValue:
+          type: number
+        batchCapacity:
+          type: integer
+          nullable: true
+        efficiency:
+          type: number
+        calendarId:
+          type: string
+          format: uuid
+          nullable: true
+        setupSeconds:
+          type: integer
+        teardownSeconds:
+          type: integer
+        industryAttrs:
+          type: object
+        version:
+          type: integer
+          minimum: 1
+          description: 乐观锁版本；与当前 resource.version 不一致返回 40901
+    MaintenanceRequest:
+      type: object
+      required: [effectiveFrom, effectiveTo, windows]
+      properties:
+        effectiveFrom:
+          type: string
+          format: date-time
+        effectiveTo:
+          type: string
+          format: date-time
+        windows:
+          type: array
+          items:
+            type: object
+            required: [startTime, endTime]
+            properties:
+              startTime:
+                type: string
+                format: date-time
+              endTime:
+                type: string
+                format: date-time
+              reason:
+                type: string
+    CalendarType:
+      type: string
+      enum: [FACTORY, RESOURCE, SHIFT]
+    Shift:
+      type: object
+      required: [startTime, endTime, daysOfWeek]
+      properties:
+        startTime:
+          type: string
+          example: '08:00'
+        endTime:
+          type: string
+          example: '20:00'
+        daysOfWeek:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 7
+    Holiday:
+      type: object
+      required: [date, name, kind]
+      properties:
+        date:
+          type: string
+          format: date
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [LEGAL, COMPANY, MAKEUP]
+    Calendar:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        calendarVersion:
+          type: integer
+          minimum: 1
+          description: |
+            日历业务版本号（calendar.calendar_version，INTEGER）。
+            递增规则：同一 tenant 下同 name 新建版本时取当前最大 calendar_version + 1；
+            历史版本只读，不原地修改。
+        type:
+          $ref: '#/components/schemas/CalendarType'
+        resourceId:
+          type: string
+          format: uuid
+          nullable: true
+        resourceGroupId:
+          type: string
+          format: uuid
+          nullable: true
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+        timezone:
+          type: string
+          nullable: true
+          description: |
+            IANA 时区名（如 Asia/Shanghai）。班次与例外日一律按该时区解释，不得按浏览器本地时区解释。
+            M2 未新增列：默认取服务端配置 aps.calendar.timezone（默认 Asia/Shanghai），空值按默认。
+        shifts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Shift'
+        holidays:
+          type: array
+          items:
+            $ref: '#/components/schemas/Holiday'
+        version:
+          type: integer
+    CalendarCreateRequest:
+      type: object
+      required: [name, calendarVersion, type, effectiveFrom, shifts]
+      properties:
+        name:
+          type: string
+        calendarVersion:
+          type: integer
+          minimum: 1
+          description: 业务版本号；同 tenant+name 下新建版本取 max+1
+        type:
+          $ref: '#/components/schemas/CalendarType'
+        resourceId:
+          type: string
+          format: uuid
+          nullable: true
+        resourceGroupId:
+          type: string
+          format: uuid
+          nullable: true
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+        timezone:
+          type: string
+          nullable: true
+          description: IANA 时区名；缺省取服务端默认时区（aps.calendar.timezone，默认 Asia/Shanghai）
+        shifts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Shift'
+        holidays:
+          type: array
+          items:
+            $ref: '#/components/schemas/Holiday'
+    CalendarUpdateRequest:
+      type: object
+      required: [version]
+      description: |
+        仅更新传入字段；calendarVersion 不可修改（新版本走创建接口）；version 必填用于乐观锁。
+      properties:
+        name:
+          type: string
+        type:
+          $ref: '#/components/schemas/CalendarType'
+        resourceId:
+          type: string
+          format: uuid
+          nullable: true
+        resourceGroupId:
+          type: string
+          format: uuid
+          nullable: true
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: string
+          format: date
+          nullable: true
+        timezone:
+          type: string
+          nullable: true
+          description: IANA 时区名；缺省取服务端默认时区（aps.calendar.timezone，默认 Asia/Shanghai）
+        shifts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Shift'
+        holidays:
+          type: array
+          items:
+            $ref: '#/components/schemas/Holiday'
+        version:
+          type: integer
+          minimum: 1
+          description: 乐观锁版本；与当前 calendar.version 不一致返回 40901
+    AvailableTime:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              startTime:
+                type: string
+                format: date-time
+              endTime:
+                type: string
+                format: date-time
+              minutes:
+                type: integer
+    RoutingStatus:
+      type: string
+      enum: [DRAFT, ACTIVE, INACTIVE]
+    RoutingDependType:
+      type: string
+      enum: [FS, SS, FF]
+      description: M1 仅支持 FS/SS/FF（V1 routing_edge CHECK）；SF 需新迁移
+    RoutingNode:
+      type: object
+      required: [seqNo]
+      description: |
+        节点字段对应 routing_node 真实列。资源引用统一用 UUID：
+        `primaryResourceId` 持久化到 `routing_node.overrides.primaryResourceId`
+        （V1 的 routing_node 没有 primary_resource_id 列）；`secondaryResourceIds`
+        持久化到 `overrides.secondaryResourceIds`，未覆盖时继承 operation_template。
+        `overrides.primaryResourceId` 为三态且**缺键 ≠ null**：
+        缺键=未覆盖（INHERIT，回退模板）；`null`=显式主资源浮动（FLOAT，求解器可选资源）；
+        UUID=固定主资源（FIXED）。请求用 `primaryResourceMode` 表达三态，
+        响应同时回显 `primaryResourceMode` 与 `primaryResourceId`（契约 C15 §20.3.1）。
+        `resourceCode`/`sequence` 仅为旧占位兼容字段，请求不再使用。
+      properties:
+        seqNo:
+          type: integer
+          minimum: 0
+          description: 节点序号，路线内唯一；对应 routing_node.seq_no
+        operationTemplateId:
+          type: string
+          format: uuid
+          nullable: true
+          description: 工序模版 UUID；对应 operation_template_id
+        operationCode:
+          type: string
+          nullable: true
+          description: 工序编码；对应 routing_node.operation_code
+        operationName:
+          type: string
+          nullable: true
+          description: 工序名称；对应 routing_node.operation_name
+        standardSeconds:
+          type: integer
+          nullable: true
+          minimum: 0
+          description: 标准加工秒数；对应 routing_node.standard_seconds
+        setupSeconds:
+          type: integer
+          nullable: true
+          minimum: 0
+          description: 换型秒数；对应 routing_node.setup_seconds
+        primaryResourceMode:
+          type: string
+          enum: [INHERIT, FLOAT, FIXED]
+          default: INHERIT
+          description: |
+            主资源三态：INHERIT=请求缺省，等价 overrides 无键（回退 operation_template）；
+            FLOAT=显式浮动，写入 overrides.primaryResourceId = null（此时 primaryResourceId 必须缺省或 null）；
+            FIXED=固定主资源，必须同时给 primaryResourceId（否则 42200）。
+            响应由 overrides 键存在性与值回显；旧请求不带本字段时按 primaryResourceId 有无推断 FIXED/INHERIT。
+        primaryResourceId:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            主资源 UUID；写入 routing_node.overrides.primaryResourceId。
+            仅在 primaryResourceMode=FIXED 时作为请求值；响应中 null 需结合 primaryResourceMode 区分未覆盖与显式浮动。
+        primaryResourceCode:
+          type: string
+          nullable: true
+          readOnly: true
+          description: 主资源编码，仅响应回显（由 primaryResourceId 反查）
+        secondaryResourceIds:
+          type: array
+          description: |
+            辅助资源 UUID 列表；写入 routing_node.overrides.secondaryResourceIds。
+            缺键（请求 null）=继承 operation_template；`[]`=显式无辅助资源；数组=显式列表。
+          items:
+            type: string
+            format: uuid
+        optional:
+          type: boolean
+          default: false
+          description: 是否可选工序；对应 routing_node.is_optional
+        resourceCode:
+          type: string
+          nullable: true
+          readOnly: true
+          deprecated: true
+          description: 旧占位字段，仅响应兼容；请求请使用 primaryResourceId
+        sequence:
+          type: integer
+          nullable: true
+          readOnly: true
+          deprecated: true
+          description: 旧占位字段，等价 seqNo；仅响应兼容
+        industryAttrs:
+          type: object
+    RoutingEdge:
+      type: object
+      required: [fromSeqNo, toSeqNo]
+      description: |
+        边按 seqNo 表达，服务端映射到 routing_node.id；
+        对应 routing_edge.from_node_id/to_node_id/depend_type/lag_minutes。
+        `from`/`to`/`minLagMinutes` 仅为旧占位兼容字段。
+      properties:
+        fromSeqNo:
+          type: integer
+          minimum: 0
+          description: 前序节点 seqNo
+        toSeqNo:
+          type: integer
+          minimum: 0
+          description: 后继节点 seqNo
+        dependType:
+          $ref: '#/components/schemas/RoutingDependType'
+        lagMinutes:
+          type: integer
+          default: 0
+          description: 滞后分钟；对应 routing_edge.lag_minutes
+        from:
+          type: string
+          deprecated: true
+          readOnly: true
+          description: 旧占位字段（node_key），仅响应兼容
+        to:
+          type: string
+          deprecated: true
+          readOnly: true
+          description: 旧占位字段（node_key），仅响应兼容
+        minLagMinutes:
+          type: integer
+          deprecated: true
+          readOnly: true
+          description: 旧占位字段，等价 lagMinutes；仅响应兼容
+    Routing:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        productCode:
+          type: string
+        routingVersion:
+          type: string
+        status:
+          $ref: '#/components/schemas/RoutingStatus'
+        effectiveDate:
+          type: string
+          format: date
+        expiryDate:
+          type: string
+          format: date
+          nullable: true
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoutingNode'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoutingEdge'
+        version:
+          type: integer
+    RoutingCreateRequest:
+      type: object
+      required: [productCode, routingVersion, effectiveDate, nodes, edges]
+      properties:
+        productCode:
+          type: string
+        routingVersion:
+          type: string
+        effectiveDate:
+          type: string
+          format: date
+        expiryDate:
+          type: string
+          format: date
+          nullable: true
+        nodes:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/RoutingNode'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoutingEdge'
+    RoutingGraphUpdateRequest:
+      type: object
+      required: [nodes, edges, version]
+      properties:
+        nodes:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/RoutingNode'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoutingEdge'
+        version:
+          type: integer
+          minimum: 1
+          description: 乐观锁版本；与当前 routing.version 不一致返回 40901
+    RoutingGraph:
+      type: object
+      properties:
+        routingId:
+          type: string
+          format: uuid
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoutingNode'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoutingEdge'
+    OperationTemplate:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        code:
+          type: string
+        name:
+          type: string
+        templateVersion:
+          type: integer
+          minimum: 1
+          description: 业务版本号；同 tenant+code 新建版本递增
+        primaryResourceId:
+          type: string
+          format: uuid
+          nullable: true
+        primaryResourceGroupId:
+          type: string
+          format: uuid
+          nullable: true
+        secondaryResourceIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        inputMaterialIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        outputMaterialId:
+          type: string
+          format: uuid
+          nullable: true
+        standardSeconds:
+          type: integer
+          minimum: 0
+        setupSeconds:
+          type: integer
+          minimum: 0
+        teardownSeconds:
+          type: integer
+          minimum: 0
+        version:
+          type: integer
+          minimum: 1
+    OperationTemplateCreateRequest:
+      type: object
+      required: [code, name]
+      properties:
+        code:
+          type: string
+          maxLength: 64
+          description: 模版编码；同一 tenant 下可对应多个 templateVersion
+        name:
+          type: string
+          maxLength: 256
+        templateVersion:
+          type: integer
+          minimum: 1
+          default: 1
+        primaryResourceId:
+          type: string
+          format: uuid
+          nullable: true
+        primaryResourceGroupId:
+          type: string
+          format: uuid
+          nullable: true
+        secondaryResourceIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        inputMaterialIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        outputMaterialId:
+          type: string
+          format: uuid
+          nullable: true
+        standardSeconds:
+          type: integer
+          minimum: 0
+          default: 0
+        setupSeconds:
+          type: integer
+          minimum: 0
+          default: 0
+        teardownSeconds:
+          type: integer
+          minimum: 0
+          default: 0
+    OperationTemplateUpdateRequest:
+      type: object
+      required: [version]
+      description: code 与 templateVersion 不可修改；新版本用 POST 创建。
+      properties:
+        name:
+          type: string
+          maxLength: 256
+        primaryResourceId:
+          type: string
+          format: uuid
+          nullable: true
+        primaryResourceGroupId:
+          type: string
+          format: uuid
+          nullable: true
+        secondaryResourceIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        inputMaterialIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+        outputMaterialId:
+          type: string
+          format: uuid
+          nullable: true
+        standardSeconds:
+          type: integer
+          minimum: 0
+        setupSeconds:
+          type: integer
+          minimum: 0
+        teardownSeconds:
+          type: integer
+          minimum: 0
+        version:
+          type: integer
+          minimum: 1
+          description: 乐观锁版本；与当前 operation_template.version 不一致返回 40901
+    MrpAnalysisRequest:
+      type: object
+      required: [sandboxId]
+      properties:
+        sandboxId:
+          type: string
+          format: uuid
+        orderNos:
+          type: array
+          items:
+            type: string
+        includeSuggestions:
+          type: boolean
+          default: true
+        blocking:
+          type: boolean
+          default: true
+          description: C25 齐套未通过时是否阻止排产提交
+    InventoryUpsertRequest:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: object
+            required: [materialCode, warehouseCode, onHandQty]
+            properties:
+              materialCode:
+                type: string
+              warehouseCode:
+                type: string
+              onHandQty:
+                type: number
+                minimum: 0
+              safetyStock:
+                type: number
+                minimum: 0
+                default: 0
+              snapshotAt:
+                type: string
+                format: date-time
+                nullable: true
+    InventoryUpsertResult:
+      type: object
+      description: C25 §24.7 冻结形状；当前实现仍返回 {created,updated,total}，由并行修复批次对齐。
+      required: [accepted, rejected]
+      properties:
+        accepted:
+          type: integer
+          description: 写入成功（新增或更新）的行数
+        rejected:
+          type: integer
+          description: 被拒绝的行数
+    MrpAnalysis:
+      type: object
+      description: 实现为 MrpAnalysisResponse；顶层追加 blocked/inventoryEnabled/orderCount/warnings（实现已返回，yaml 此前缺省）。
+      properties:
+        sandboxId:
+          type: string
+          format: uuid
+        analyzedAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [FULL, PARTIAL, SHORTAGE]
+          description: C25 齐套结论
+        blocking:
+          type: boolean
+        blocked:
+          type: boolean
+          description: 实际是否阻塞（blocking=true 且存在缺料）
+        inventoryEnabled:
+          type: boolean
+          description: 是否从 inventory 表读取库存（aps.mrp.inventory-enabled）
+        orderCount:
+          type: integer
+          description: 参与分析的订单数
+        warnings:
+          type: array
+          description: 展开过程中的非致命提示（无 ACTIVE BOM、环引用等）
+          items:
+            type: string
+        orders:
+          type: array
+          items:
+            $ref: '#/components/schemas/MrpOrderResult'
+        shortages:
+          type: array
+          items:
+            $ref: '#/components/schemas/MrpShortage'
+      example:
+        sandboxId: 00000000-0000-0000-0000-000000000401
+        analyzedAt: '2026-11-05T02:00:00Z'
+        status: SHORTAGE
+        blocking: false
+        blocked: false
+        inventoryEnabled: true
+        orderCount: 1
+        warnings: []
+        orders:
+          - orderNo: SO-1009
+            productCode: FG-ESS-005
+            qty: 30.0
+            dueDate: '2026-12-28'
+            kitted: false
+            kittingStatus: PARTIAL
+            shortageItemCount: 2
+            totalItemCount: 16
+            shortages:
+              - materialCode: RAW-THM-001
+                materialName: EC 离心散热风机模组 48V
+                requiredQty: 60.6
+                allocatedQty: 0.0
+                shortageQty: 60.6
+              - materialCode: RAW-BMS-002
+                materialName: 电池管理系统
+                requiredQty: 30.0
+                allocatedQty: 0.0
+                shortageQty: 30.0
+        shortages:
+          - materialCode: RAW-THM-001
+            materialName: EC 离心散热风机模组 48V
+            requiredQty: 60.6
+            onHandQty: 0.0
+            transitQty: 0.0
+            safetyStock: 10.0
+            availableQty: -10.0
+            shortageQty: 60.6
+            earliestRequiredAt: '2026-12-28T00:00:00Z'
+            affectedOrderNos: [SO-1009]
+            suggestedPurchaseDate: null
+            suggestedQty: null
+            supplierCode: SUP-D04
+            substitutes:
+              - materialCode: RAW-THM-002
+                priority: 1
+                ratio: '1:1'
+                availableQty: 100.0
+            expectedArrival: null
+          - materialCode: RAW-BMS-002
+            materialName: 电池管理系统
+            requiredQty: 30.0
+            onHandQty: 0.0
+            transitQty: 0.0
+            safetyStock: 0.0
+            availableQty: 0.0
+            shortageQty: 30.0
+            earliestRequiredAt: '2026-12-28T00:00:00Z'
+            affectedOrderNos: [SO-1009]
+            suggestedPurchaseDate: null
+            suggestedQty: null
+            supplierCode: SUP-D02
+            substitutes:
+              - materialCode: RAW-BMS-003
+                priority: 1
+                ratio: '1:1'
+                availableQty: 30.0
+            expectedArrival: '2027-01-04T00:00:00Z'
+    MrpOrderResult:
+      type: object
+      description: |
+        单张订单齐套结果（实现 MrpAnalysisResponse.MrpOrderResult）。
+        §25.16 冻结：对外使用 kitted/shortages，不再返回旧 status/shortageCount。
+      properties:
+        orderNo:
+          type: string
+        productCode:
+          type: string
+        qty:
+          type: number
+        dueDate:
+          type: string
+          format: date
+        kitted:
+          type: boolean
+          description: 是否齐套（既有布尔语义不变：shortages 为空即 true）；映射旧 status：true→FULL，false→SHORTAGE/PARTIAL
+        kittingStatus:
+          type: string
+          enum: [FULL, PARTIAL, SHORTAGE]
+          description: |
+            C49 §25.24 订单级三态：shortageItemCount=0 → FULL；
+            shortageItemCount=totalItemCount 且 >0 → SHORTAGE；其余（部分缺料）→ PARTIAL。
+            与 kitted 的对应关系：kitted=true ⇔ kittingStatus=FULL；kitted=false ⇔ PARTIAL 或 SHORTAGE。
+          example: PARTIAL
+        shortageItemCount:
+          type: integer
+          description: 该订单的缺料物料项数（= shortages.length）
+          example: 2
+        totalItemCount:
+          type: integer
+          description: 该订单展开后的物料项总数（去重后的物料口径）
+          example: 16
+        shortages:
+          type: array
+          description: 该订单的缺料明细；长度映射旧 shortageCount
+          items:
+            $ref: '#/components/schemas/MrpOrderShortage'
+    MrpOrderShortage:
+      type: object
+      description: 订单级缺料明细（实现 MrpAnalysisResponse.MrpOrderShortage）。
+      properties:
+        materialCode:
+          type: string
+        materialName:
+          type: string
+        requiredQty:
+          type: number
+          description: 该订单需求数量（已含 BOM 损耗）
+        allocatedQty:
+          type: number
+          description: 分配到该订单的可用数量
+        shortageQty:
+          type: number
+    MrpShortage:
+      type: object
+      description: |
+        按物料聚合的缺料行（实现 MrpAnalysisResponse.MrpShortage，C25 §24.7）。
+        与 `/mrp/suggestions` 的 MrpSuggestionView 不同：本形状必须暴露 onHandQty/transitQty/safetyStock。
+      properties:
+        materialCode:
+          type: string
+        materialName:
+          type: string
+        requiredQty:
+          type: number
+          description: 跨订单毛需求合计
+        onHandQty:
+          type: number
+          description: 现有库存合计
+        transitQty:
+          type: number
+          description: 在途库存合计（仅计入需求时点前的 OPEN 在途）
+        safetyStock:
+          type: number
+          description: 安全库存合计
+        availableQty:
+          type: number
+          description: onHand + transit − safetyStock，可为负
+        shortageQty:
+          type: number
+        earliestRequiredAt:
+          type: string
+          format: date-time
+          nullable: true
+        affectedOrderNos:
+          type: array
+          items:
+            type: string
+        suggestedPurchaseDate:
+          type: string
+          format: date-time
+          nullable: true
+          description: includeSuggestions=true 时输出
+        suggestedQty:
+          type: number
+          nullable: true
+          description: includeSuggestions=true 时输出
+        supplierCode:
+          type: string
+          nullable: true
+          description: C49 §25.24 物料主数据 default_supplier_id 对应的 supplier.code；无默认供应商时为 null
+          example: SUP-D04
+        substitutes:
+          type: array
+          description: |
+            C49 §25.24 替代料候选，来源为 BOM 明细 substitutes JSONB（不硬编码）；
+            按 priority 升序、同优先级按 materialCode 升序；无替代关系时为空数组。
+          items:
+            $ref: '#/components/schemas/MrpSubstitute'
+          example:
+            - materialCode: RAW-THM-002
+              priority: 1
+              ratio: '1:1'
+              availableQty: 100.0
+        expectedArrival:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            C49 §25.24：只要有未取消的在途，就返回最早一条 inventory_transit.expected_date（00:00 UTC），
+            无论是否晚于需求日；无在途时为 null。只有当该日期不晚于需求日时，才把数量计入
+            transitQty / availableQty。两者可同时成立：日期给了、缺口仍在（expectedArrival 有值而 transitQty=0）。
+            验收样本：RAW-BMS-002 在途锚点 +60（2027-01-04）、1009 交期 +53（2026-12-28），返回该日期且 transitQty=0。
+          example: '2027-01-04T00:00:00Z'
+    MrpSubstitute:
+      type: object
+      description: C49 §25.24 替代料候选（实现 MrpAnalysisResponse.MrpSubstitute）。
+      properties:
+        materialCode:
+          type: string
+          description: 替代料物料编码
+          example: RAW-THM-002
+        priority:
+          type: integer
+          nullable: true
+          description: 替代优先级（数值越小越优先），来自 BOM substitutes JSONB
+          example: 1
+        ratio:
+          type: string
+          nullable: true
+          description: 替代比例（原样输出 BOM substitutes JSONB 的 ratio，如 1:1）
+          example: '1:1'
+        availableQty:
+          type: number
+          description: 替代料可用量 = max(0, 现有库存 + 父件需求时点前在途 − 安全库存)
+          example: 100.0
+    MrpSuggestionView:
+      type: object
+      description: |
+        采购建议项（实现 MrpAnalysisResponse.MrpSuggestionView，§25.6 C34）。
+        由 MrpShortage 投影而来，刻意不携带 onHandQty/transitQty/safetyStock 库存明细。
+      properties:
+        materialCode:
+          type: string
+        materialName:
+          type: string
+        requiredQty:
+          type: number
+        availableQty:
+          type: number
+        shortageQty:
+          type: number
+        earliestRequiredAt:
+          type: string
+          format: date-time
+          nullable: true
+        affectedOrderNos:
+          type: array
+          items:
+            type: string
+        suggestedPurchaseDate:
+          type: string
+          format: date-time
+          nullable: true
+        suggestedQty:
+          type: number
+          nullable: true
+        supplierCode:
+          type: string
+          nullable: true
+    ResultOfInventoryUpsert:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/InventoryUpsertResult'
+    ResultOfMaterial:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/Material'
+    ResultOfMaterialPage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Material'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer
+    ResultOfBom:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/Bom'
+    ResultOfBomPage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Bom'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer
+    ResultOfBomTree:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/BomTreeNode'
+    ResultOfResource:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/Resource'
+    ResultOfResourcePage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Resource'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer
+    ResultOfCalendar:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/Calendar'
+    ResultOfCalendarPage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Calendar'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer
+    ResultOfAvailableTime:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/AvailableTime'
+    ResultOfRouting:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/Routing'
+    ResultOfRoutingPage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Routing'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer
+    ResultOfRoutingGraph:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/RoutingGraph'
+    ResultOfOperationTemplatePage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/OperationTemplate'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer
+    ResultOfOperationTemplate:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/OperationTemplate'
+    ResultOfMrpAnalysis:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/MrpAnalysis'
+    ResultOfMrpSuggestionPage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/MrpSuggestionView'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer
+    SetupMatrixRequest:
+      type: object
+      required: [keyType, setupSeconds]
+      properties:
+        keyType:
+          type: string
+          description: PRODUCT/PROGRAM（兼容 MATERIAL_CODE/OPERATION_CODE）
+          enum: [PRODUCT, PROGRAM, MATERIAL_CODE, OPERATION_CODE]
+        fromKey:
+          type: string
+          maxLength: 64
+          description: 前序维度键；为空表示通配默认
+        toKey:
+          type: string
+          maxLength: 64
+          description: 当前维度键；为空表示通配默认
+        resourceId:
+          type: string
+          format: uuid
+          description: 资源级范围；与 resourceGroupId 互斥
+        resourceGroupId:
+          type: string
+          format: uuid
+          description: 资源组级范围；与 resourceId 互斥
+        setupSeconds:
+          type: integer
+          minimum: 0
+          description: 默认换型秒数
+        sameSeriesSeconds:
+          type: integer
+          minimum: 0
+          description: 同系列特例秒数，空表示回退默认值
+        crossSeriesSeconds:
+          type: integer
+          minimum: 0
+          description: 跨系列特例秒数，空表示回退默认值
+        remark:
+          type: string
+          maxLength: 255
+        version:
+          type: integer
+          minimum: 1
+          description: 更新时必填（乐观锁）
+    SetupMatrixEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        keyType:
+          type: string
+          enum: [MATERIAL_CODE, OPERATION_CODE]
+          description: MATERIAL_CODE=产品，OPERATION_CODE=程序
+        fromKey:
+          type: string
+          nullable: true
+        toKey:
+          type: string
+          nullable: true
+        scopeType:
+          type: string
+          enum: [TENANT, RESOURCE_GROUP, RESOURCE]
+        resourceId:
+          type: string
+          format: uuid
+          nullable: true
+        resourceGroupId:
+          type: string
+          format: uuid
+          nullable: true
+        setupSeconds:
+          type: integer
+          minimum: 0
+        sameSeriesSeconds:
+          type: integer
+          minimum: 0
+          nullable: true
+        crossSeriesSeconds:
+          type: integer
+          minimum: 0
+          nullable: true
+        remark:
+          type: string
+          nullable: true
+        version:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ResultOfSetupMatrixEntry:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/SetupMatrixEntry'
+    ResultOfSetupMatrixEntryPage:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/SetupMatrixEntry'
+                page:
+                  type: integer
+                size:
+                  type: integer
+                total:
+                  type: integer
+                  format: int64
+                totalPages:
+                  type: integer

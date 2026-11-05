@@ -1,0 +1,366 @@
+openapi: 3.0.3
+info:
+  title: 衡策 APS - Excel 导入导出 API
+  version: 0.1.0
+  description: |
+    C26 通用导入导出（M2）。实现实体集合以 `ImportEntity` 为准，共 10 类：
+    materials / boms / resources / calendars / operationTemplates / routings / orders / strategies / suppliers / customers。
+    `customers` 由 §25.9 C38 冻结（slug 复数）；C26 原拟名单只提 customers 未提 strategies，以 §25.9 与本枚举为准（见 contract-freeze §24.12）。
+    兼容别名（用于绕开 M1 遗留的 /materials/import 占位映射）：GET /import/{entity}/template、POST /import/{entity}、GET /export/{entity}，
+    不重复登记为独立 path。异步导入任务端点 GET/POST /{entity}/import/jobs/{jobId}[/cancel] 返回裸 ImportJobView（不包 Result）。统一约定见 ../../docs/api/conventions.md。
+servers:
+  - url: /api/v1
+tags:
+  - name: 导入导出
+paths:
+  /{entity}/import/template:
+    x-milestone: M2
+    get:
+      operationId: downloadImportTemplate
+      tags: [导入导出]
+      summary: 下载导入模板
+      description: 状态：已制品级验收（2026-11-04，车道C）。原 9 类实体均返回 200 + xlsx（魔数 50-4B-03-04）与 Content-Disposition；未知实体 404/40400。`customers` 已按 §25.9 C38 补入枚举（`ImportEntity.java#L122`），其制品级证据待补。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/ImportEntity'
+      responses:
+        '200':
+          description: xlsx 文件
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+            X-Template-Filename:
+              schema:
+                type: string
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /{entity}/import:
+    x-milestone: M2
+    post:
+      operationId: importEntityData
+      tags: [导入导出]
+      summary: 导入 Excel
+      description: |
+        状态：已制品级验收（2026-11-04，车道C；ImportExportController#importFile，
+        aps-web/src/main/java/com/hengce/aps/web/controller/importexport/ImportExportController.java:108-136）。
+        preview 返回逐行错误明细（row/field/code/message）；execute 全量合法才 committed=true，非法行 0 落库；async 返回 202 + 裸 ImportJobView。
+        mode=preview 只校验并返回规范化样例；mode=execute 全部行通过后落库；mode=async 受理后返回 202 + ImportJobView（裸对象，不包 Result）。
+        X-Import-Token 幂等：执行模式下重复提交同一令牌返回首次结果（replayed=true）。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/ImportEntity'
+        - name: mode
+          in: query
+          required: false
+          description: preview（默认）/ execute / async
+          schema:
+            type: string
+            enum: [preview, execute, async]
+            default: preview
+        - name: X-Import-Token
+          in: header
+          required: false
+          description: 幂等令牌，8-128 位
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: 导入结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultOfImportResult'
+        '202':
+          description: 异步受理（裸 ImportJobView，不包 Result）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportJob'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /{entity}/import/jobs/{jobId}:
+    x-milestone: M3
+    get:
+      operationId: getImportJob
+      tags: [导入导出]
+      summary: 查询异步导入任务
+      description: |
+        状态：已制品级验收（2026-11-04，车道C；ImportExportController#importJob）。**响应是裸 ImportJobView，不包 Result**。
+        跨实体查询（job 不属于该 entity）按 40400 处理。已验证明细字段：status/totalRows/processedRows/inserted/updated/committed/errors，
+        与 import_job 表行字段一致；SUCCEEDED 任务落库行数一致。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/ImportEntity'
+        - name: jobId
+          in: path
+          required: true
+          description: 任务 UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: 任务视图（裸对象）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportJob'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /{entity}/import/jobs/{jobId}/cancel:
+    x-milestone: M3
+    post:
+      operationId: cancelImportJob
+      tags: [导入导出]
+      summary: 取消异步导入任务
+      description: |
+        状态：已制品级验收（2026-11-04，车道C；ImportExportController#cancelImportJob）。**响应为 202 + 裸 ImportJobView，不包 Result**。
+        仅 PENDING/RUNNING 可取消，其他状态 40901。验收：取消后 status=CANCELLED、committed=false，import_job 行同步；
+        4000 行异步任务取消后业务表 0 行写入。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/ImportEntity'
+        - name: jobId
+          in: path
+          required: true
+          description: 任务 UUID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '202':
+          description: 取消后的任务视图（裸对象）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImportJob'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /{entity}/export:
+    x-milestone: M2
+    get:
+      operationId: exportEntityData
+      tags: [导入导出]
+      summary: 导出数据
+      description: 状态：已制品级验收（2026-11-04，车道C）。9 个实体导出均为真实 xlsx（魔数 50-4B-03-04），行数与库内业务行一致；列顺序与导入模板一致，可直接回填导入。
+        `orders` 自 2026-11-05（C48 / §25.23）在既有 7 列后输出 `客户编码`，并追加只读 `客户名称`（无客户时两列留空）；真实 HTTP 验收 200，traceId `2afe47b5220b4d7fa7f05c5135926dd9`。
+      x-implementation-status: implemented
+      parameters:
+        - $ref: '#/components/parameters/ImportEntity'
+      responses:
+        '200':
+          description: xlsx 文件
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+components:
+  parameters:
+    ImportEntity:
+      name: entity
+      in: path
+      required: true
+      description: 实体 slug
+      schema:
+        type: string
+        enum: [materials, boms, resources, calendars, operationTemplates, routings, orders, strategies, suppliers, customers]
+      x-import-columns:
+        orders:
+          description: |
+            C48 / §25.23 追加式列定义（2026-11-05）：前 7 列顺序与语义不变，第 8 列 customerCode 可选。
+            旧 7 列模板仍可导入（缺列=未指定客户）；customerCode 未命中 customer.code 时整行 42200，不自动建客户。
+            导出在同 7 列后补 客户编码，并追加只读 客户名称。
+          columns:
+            - { key: orderNo, header: 订单号, required: true }
+            - { key: source, header: 订单来源, required: false, enum: [ERP_SYNC, MANUAL, AGENT] }
+            - { key: materialCode, header: 产品物料编码, required: true }
+            - { key: qty, header: 数量, required: true }
+            - { key: dueDate, header: 交期, required: true }
+            - { key: priority, header: 优先级, required: false, enum: [URGENT, HIGH, NORMAL, LOW] }
+            - { key: remark, header: 备注, required: false }
+            - key: customerCode
+              header: 客户编码
+              required: false
+              description: 可选；按 customer.code 解析，未命中整行 42200；留空=未指定客户
+          x-implementation-status: implemented
+          x-verified-at: '2026-11-05'
+          x-verification:
+            template: 'HTTP 200, 8 columns, traceId 9f0fc5227e604d30aa0806f9a83e62c8'
+            old7Import: 'HTTP 200 / code=0 inserted=2, traceId 0bce91f2043b47e58c060bd6874df931'
+            new8Import: 'HTTP 200 / code=0 inserted=2, traceId 0f01b8379d294626a402cf4f459f4be7'
+            badCustomerCode: 'HTTP 200 / code=0 invalidRows=1 code 42200 row=3, traceId 131b68e8d5fe4e07a366f29382423410'
+            export: 'HTTP 200, headers 客户编码/客户名称, traceId 2afe47b5220b4d7fa7f05c5135926dd9'
+  schemas:
+    Result:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+        message:
+          type: string
+        data:
+          nullable: true
+        traceId:
+          type: string
+    ResultOfImportResult:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ImportResult'
+    ImportJobStatus:
+      type: string
+      description: 异步导入任务状态机（C39）：PENDING → RUNNING → SUCCEEDED | FAILED | CANCELLED
+      enum: [PENDING, RUNNING, SUCCEEDED, FAILED, CANCELLED]
+    ImportJob:
+      type: object
+      description: |
+        异步导入任务视图（ImportJobView）；字段取自 aps-service/.../service/importexport/ImportJobView.java，
+        形状未经制品级验收。注意任务端点直接返回本对象，不包 Result 外壳。
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        entity:
+          type: string
+        mode:
+          type: string
+          description: 固定为 async
+          example: async
+        status:
+          $ref: '#/components/schemas/ImportJobStatus'
+        totalRows:
+          type: integer
+          description: 数据行总数（受理时为 0，执行后回填）
+        processedRows:
+          type: integer
+        inserted:
+          type: integer
+        updated:
+          type: integer
+        skipped:
+          type: integer
+        invalidRows:
+          type: integer
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImportError'
+        committed:
+          type: boolean
+          description: 是否已提交落库；FAILED 必为 false
+        contentHash:
+          type: string
+          description: '内容摘要，形如 sha256:<hex>'
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+    ImportError:
+      type: object
+      required: [row, field, code, message]
+      properties:
+        row:
+          type: integer
+        field:
+          type: string
+        code:
+          type: integer
+        message:
+          type: string
+    ImportResult:
+      type: object
+      required: [entity, mode, totalRows, validRows, invalidRows, inserted, updated, skipped, committed, replayed, errors, preview]
+      properties:
+        entity:
+          type: string
+        mode:
+          type: string
+          enum: [PREVIEW, EXECUTE]
+        totalRows:
+          type: integer
+        validRows:
+          type: integer
+        invalidRows:
+          type: integer
+        inserted:
+          type: integer
+        updated:
+          type: integer
+        skipped:
+          type: integer
+        committed:
+          type: boolean
+        replayed:
+          type: boolean
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImportError'
+        preview:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+  responses:
+    BadRequest:
+      description: 参数或请求体非法
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Unprocessable:
+      description: 业务校验失败（42200）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    NotFound:
+      description: 资源不存在（40400）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'
+    Conflict:
+      description: 状态冲突（40901）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Result'

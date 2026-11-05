@@ -1,0 +1,14 @@
+{
+  "name": "mfg-aps-arch-page",
+  "version": "1.0.0",
+  "private": true,
+  "description": "衡策 APS 开源版：落地架构详细设计 + 分阶段协同开发任务拆解（动态看板）",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,303 @@
+# =============================================================================
+# 衡策 APS 开源版 · GitHub Actions 持续集成
+#   覆盖：后端打包 / 单元测试（含覆盖率采集）/ 静态检查 / 前端构建 / 镜像构建
+#   说明文档：docs/ci-cd.md
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
+
+# 同一分支/PR 的旧流水线自动取消，避免镜像仓库与缓存写入竞争
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write # 推送 GHCR 镜像所需（未启用推送时不影响构建）
+
+env:
+  JAVA_VERSION: '21'
+  NODE_VERSION: '22'
+  NPM_CONFIG_FUND: 'false'
+  NPM_CONFIG_AUDIT: 'false'
+  # 主分支推送时才推送镜像；PR 只验证镜像可构建
+  PUSH_IMAGES: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. 后端打包（跳过单测，产出可运行 fat jar）
+  # ---------------------------------------------------------------------------
+  backend-package:
+    name: 后端打包（skipTests）
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 21 + Maven 缓存
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+          cache-dependency-path: '**/pom.xml'
+
+      - name: Maven 打包
+        run: mvn -B -ntp -DskipTests -Dcheckstyle.skip=true -Dpmd.skip=true package
+
+      - name: 归档后端 jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: aps-admin-jar
+          path: aps-admin/target/*.jar
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 2. 单元测试（与打包分离；覆盖率经 JaCoCo CLI 采集，见 docs/ci-cd.md）
+  # ---------------------------------------------------------------------------
+  backend-test:
+    name: 单元测试 + 覆盖率
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # 真库集成测试（M1-QA-01）需要 PostgreSQL；用 service 容器提供，避免 Testcontainers
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: aps_local
+          POSTGRES_USER: aps
+          POSTGRES_PASSWORD: aps_dev_pwd
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aps -d aps_local"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      APS_TEST_DB_ENABLED: 'true'
+      APS_TEST_DB_HOST: 127.0.0.1
+      APS_TEST_DB_PORT: '5432'
+      APS_TEST_DB_NAME: aps_local
+      APS_TEST_DB_USER: aps
+      APS_TEST_DB_PASSWORD: aps_dev_pwd
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 21 + Maven 缓存
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+          cache-dependency-path: '**/pom.xml'
+
+      - name: 初始化测试库
+        # 复用 postgres:15 镜像内的 psql；host 网络访问 service 容器映射端口
+        run: |
+          docker run --rm -i --network host -e PGPASSWORD=aps_dev_pwd postgres:15 \
+            psql -h 127.0.0.1 -p 5432 -U aps -d aps_local -v ON_ERROR_STOP=1 \
+            -f - < db/migration/V1__init.sql
+
+      - name: 执行单测并生成 JaCoCo 报告
+        # pom.xml 尚未接入 jacoco（属骨架/P0-02 范围），此处以命令行插件方式
+        # 临时采集覆盖率；pom 正式接入后可退化为 `mvn -B test`。
+        run: |
+          mvn -B -ntp -Dcheckstyle.skip=true -Dpmd.skip=true \
+            org.jacoco:jacoco-maven-plugin:0.8.12:prepare-agent test \
+            org.jacoco:jacoco-maven-plugin:0.8.12:report
+
+      - name: 归档测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-reports
+          path: |
+            **/target/surefire-reports/**
+            **/target/site/jacoco/**
+          if-no-files-found: warn
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 3. 静态检查：Checkstyle + PMD（Maven verify）+ ESLint + Prettier
+  #    P0-02 已将 checkstyle/pmd 绑定到 verify 阶段（config/checkstyle、config/pmd），
+  #    前端 lint/format:check 脚本亦已就绪；--if-present 仅用于兼容早期分支，
+  #    脚本存在时即强制拦截。
+  # ---------------------------------------------------------------------------
+  static-analysis:
+    name: 静态检查（Checkstyle/PMD/ESLint）
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 JDK 21 + Maven 缓存
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+          cache-dependency-path: '**/pom.xml'
+
+      - name: 安装 Node 22 + npm 缓存
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: aps-frontend/package-lock.json
+
+      - name: Checkstyle / PMD
+        # 由 P0-02 在根 pom 绑定到 verify 阶段，违规即失败
+        run: mvn -B -ntp -DskipTests verify
+
+      - name: 安装前端依赖
+        working-directory: aps-frontend
+        run: npm ci
+
+      - name: ESLint
+        working-directory: aps-frontend
+        run: npm run lint --if-present
+
+      - name: Prettier 格式检查
+        working-directory: aps-frontend
+        run: npm run format:check --if-present
+
+  # ---------------------------------------------------------------------------
+  # 4. 前端构建（Node 20 / 22 LTS 双版本验证）
+  # ---------------------------------------------------------------------------
+  frontend-build:
+    name: 前端构建（Node ${{ matrix.node }}）
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node ${{ matrix.node }} + npm 缓存
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: aps-frontend/package-lock.json
+
+      - name: 安装前端依赖
+        working-directory: aps-frontend
+        run: npm ci
+
+      - name: ESLint（强制拦截）
+        working-directory: aps-frontend
+        run: npm run lint --if-present
+
+      - name: 类型检查 + 构建
+        working-directory: aps-frontend
+        run: npm run build
+
+      - name: 归档前端 dist（仅 Node 22 一份）
+        if: matrix.node == '22'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aps-frontend-dist
+          path: aps-frontend/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 5. 镜像构建（依赖前面全部 job 通过；仅 main 分支推送 GHCR）
+  # ---------------------------------------------------------------------------
+  docker-images:
+    name: 镜像构建（backend / frontend）
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs:
+      - backend-package
+      - backend-test
+      - static-analysis
+      - frontend-build
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 初始化 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        if: env.PUSH_IMAGES == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成后端镜像元数据
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/mfg-aps-admin
+          tags: |
+            type=sha,format=short,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=pr,prefix=pr-
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=衡策 APS 后端
+            org.opencontainers.image.description=APS 排产服务（Spring Boot + Timefold / OR-Tools）
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: 构建后端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: aps-admin/Dockerfile
+          platforms: linux/amd64
+          push: ${{ env.PUSH_IMAGES == 'true' }}
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha,scope=aps-admin
+          cache-to: type=gha,mode=max,scope=aps-admin
+
+      - name: 生成前端镜像元数据
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/mfg-aps-frontend
+          tags: |
+            type=sha,format=short,prefix=sha-
+            type=ref,event=branch
+            type=ref,event=pr,prefix=pr-
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=衡策 APS 前端
+            org.opencontainers.image.description=APS 排产前端（Vue 3 + Vite，Nginx 托管）
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: 构建前端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: aps-frontend
+          file: aps-frontend/Dockerfile
+          platforms: linux/amd64
+          push: ${{ env.PUSH_IMAGES == 'true' }}
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          labels: ${{ steps.meta-frontend.outputs.labels }}
+          cache-from: type=gha,scope=aps-frontend
+          cache-to: type=gha,mode=max,scope=aps-frontend

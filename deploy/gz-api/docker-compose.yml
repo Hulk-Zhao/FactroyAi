@@ -52,6 +52,98 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  # ---------------------------------------------------------------------------
+  # smart-aps-agent（智能 APS 排产平台）后端：PostgreSQL 15 + Spring Boot 3
+  # 前端静态产物在香港（smart-aps-frontend），本机只跑 API，由香港反代 8085。
+  # 资源占用：APS 后端 700m + PostgreSQL 256m；与上面的 mfg-agent 共用 4C4G 时请复核内存。
+  # ---------------------------------------------------------------------------
+  aps-postgres:
+    image: postgres:15
+    container_name: hulkai_aps_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${APS_DB_NAME:-aps}
+      POSTGRES_USER: ${APS_DB_USER:-aps}
+      POSTGRES_PASSWORD: ${APS_DB_PASSWORD:-aps_demo_pwd_2026}
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
+    volumes:
+      - aps_pgdata:/var/lib/postgresql/data
+      # 首次初始化只创建 pgcrypto / pg_trgm 扩展；业务表由后端 Flyway 创建
+      - ../../projects/smart-aps-agent/deploy/initdb:/docker-entrypoint-initdb.d:ro
+    expose:
+      - "5432"
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  aps-backend:
+    build:
+      # 多阶段构建（Maven + JRE），源码来自主仓 projects/smart-aps-agent
+      context: ../../projects/smart-aps-agent
+      dockerfile: aps-admin/Dockerfile
+      args:
+        # 国内构建直连 Maven Central 易被 TLS 中断；可用 .env 覆盖为其它镜像
+        MAVEN_MIRROR_URL: ${APS_MAVEN_MIRROR_URL:-https://maven.aliyun.com/repository/public}
+    image: ${APS_IMAGE_TAG:-hulkai-aps-backend:latest}
+    container_name: hulkai_aps_backend
+    depends_on:
+      aps-postgres:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      LANG: C.UTF-8
+      JAVA_OPTS: "-XX:MaxRAMPercentage=70 -XX:+UseG1GC -Dfile.encoding=UTF-8 -Duser.timezone=Asia/Shanghai"
+      # dev profile 用于 Flyway、admin 首启口令与演示数据；生产安全模式由 APS_SECURITY_MODE 控制
+      SPRING_PROFILES_ACTIVE: ${APS_SPRING_PROFILES:-dev}
+      DB_HOST: aps-postgres
+      DB_PORT: "5432"
+      DB_NAME: ${APS_DB_NAME:-aps}
+      DB_USER: ${APS_DB_USER:-aps}
+      DB_PASSWORD: ${APS_DB_PASSWORD:-aps_demo_pwd_2026}
+      SPRING_DATASOURCE_URL: "jdbc:postgresql://aps-postgres:5432/${APS_DB_NAME:-aps}"
+      SPRING_DATASOURCE_USERNAME: ${APS_DB_USER:-aps}
+      SPRING_DATASOURCE_PASSWORD: ${APS_DB_PASSWORD:-aps_demo_pwd_2026}
+      SPRING_FLYWAY_ENABLED: ${APS_FLYWAY_ENABLED:-true}
+      # 认证：默认 prod（所有接口需 JWT）；admin 首启口令只在 dev profile 写入一次
+      APS_SECURITY_MODE: ${APS_SECURITY_MODE:-prod}
+      APS_SECURITY_JWT_SECRET: ${APS_SECURITY_JWT_SECRET:-aps-demo-jwt-secret-change-me-0123456789abcdef}
+      APS_SECURITY_JWT_TTL_SECONDS: ${APS_SECURITY_JWT_TTL_SECONDS:-28800}
+      APS_ADMIN_INIT_PASSWORD: ${APS_ADMIN_INIT_PASSWORD:-ApsDemo2026}
+      # STOMP Origin 白名单：必须包含香港站点域名，否则求解进度 WebSocket 会被拒
+      APS_SECURITY_WS_ALLOWED_ORIGINS: ${APS_SECURITY_WS_ALLOWED_ORIGINS:-https://hulkai.cn,https://www.hulkai.cn}
+      APS_BUSINESS_TIME_ZONE: Asia/Shanghai
+    ports:
+      # 只给香港反代；云安全组需限制来源 43.132.214.124/32
+      - "${APS_BACKEND_PORT:-8085}:8080"
+    mem_limit: 700m
+    memswap_limit: 900m
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      # 首次启动要跑 Flyway（28 张表），给足冷启动时间
+      start_period: 180s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
 volumes:
   mfg_data:
     name: mfg_data
+  aps_pgdata:
+    name: hulkai_aps_pgdata
