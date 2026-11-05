@@ -48,7 +48,10 @@ server {
         proxy_pass $aps_backend;
 
         proxy_http_version 1.1;
-        proxy_set_header Host $host;
+        # 广州 8085 前置的腾讯云会拦截带域名 Host 的请求（302 到 dnspod webblock 页），
+        # 因此回源 Host 用上游地址（IP:端口），真实域名通过 X-Forwarded-Host 传给后端。
+        proxy_set_header Host $proxy_host;
+        proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -69,7 +72,9 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
+        # 同 /api/：回源 Host 用上游地址，避免被腾讯云按域名 Host 拦截；真实域名见 X-Forwarded-Host。
+        proxy_set_header Host $proxy_host;
+        proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
