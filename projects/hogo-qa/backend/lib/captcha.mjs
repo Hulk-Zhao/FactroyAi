@@ -100,6 +100,20 @@ function sameCode(a, b) {
 }
 
 /**
+ * 输入归一化：全角转半角（NFKC）、去掉所有空白（含全角空格）、转大写。
+ *
+ * 中文输入法在中英文混排时常把 `ＡＢＣ１２３` 打成全角，肉眼与半角几乎无差别，
+ * 只做 `trim().toUpperCase()` 会让这类输入「看起来完全正确却永远报错」。
+ * 归一化后与字符集口径一致，不影响防刷语义。
+ */
+function normalizeCode(code) {
+  return String(code)
+    .normalize('NFKC')
+    .replace(/\s+/gu, '')
+    .toUpperCase();
+}
+
+/**
  * 签发一张验证码。返回 `{ id, svg }`——答案只留在服务端，HTTP 应答不回明文。
  */
 export function issueCaptcha() {
@@ -133,7 +147,7 @@ export function issueCaptcha() {
  */
 export function verifyCaptcha(captchaId, code) {
   const id = typeof captchaId === 'string' ? captchaId.trim() : '';
-  const input = typeof code === 'string' ? code.trim().toUpperCase() : '';
+  const input = typeof code === 'string' ? normalizeCode(code) : '';
   if (!id || !input) {
     return { ok: false, message: '请输入验证码' };
   }

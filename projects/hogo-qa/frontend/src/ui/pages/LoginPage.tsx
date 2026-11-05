@@ -29,6 +29,20 @@ const DARK_FIELD_SX = {
 /** 验证码输入长度（与后端 CAPTCHA_LEN 一致）。 */
 const CAPTCHA_LEN = 4;
 
+/**
+ * 验证码输入归一化：全角转半角（NFKC）、去掉所有空白、转大写、截断到 4 位。
+ *
+ * 与后端 `captcha.mjs` 的 normalizeCode 同一口径：中文输入法常把字母数字打成
+ * 全角（`ＡＢＣ１２３`），肉眼与半角几乎无差别，不归一化就会「看着完全正确却永远报错」。
+ */
+function normalizeCaptchaInput(raw: string): string {
+  return raw
+    .normalize('NFKC')
+    .replace(/\s+/gu, '')
+    .toUpperCase()
+    .slice(0, CAPTCHA_LEN);
+}
+
 /** 特性卖点（登录页上的"作品名片"）。 */
 const FEATURES = ['SPC 控制图', 'Cp · Cpk · Pp · Ppk', '12 条判异准则', '柏拉图', 'AI 解读（可选）', 'Excel / Word 报表'];
 
@@ -226,7 +240,7 @@ export default function LoginPage({ onSuccess }: { onSuccess: () => void }): Rea
               label="验证码"
               placeholder={`输入图中 ${CAPTCHA_LEN} 位字符`}
               value={captchaCode}
-              onChange={(e) => setCaptchaCode(e.target.value.toUpperCase().slice(0, CAPTCHA_LEN))}
+              onChange={(e) => setCaptchaCode(normalizeCaptchaInput(e.target.value))}
               error={!!error}
               autoComplete="off"
               data-testid="login-captcha"

@@ -129,6 +129,37 @@ try {
     assert.ok(r.body.message.includes('口令'), `应提示口令错误，实际：${r.body.message}`);
   });
 
+  await check('错误验证码 → 401 且同一 id 立即作废', async () => {
+    const cap = await getCaptcha();
+    const bad = await loginWith(cap.ip, {
+      password: config.authPassword,
+      captchaId: cap.id,
+      captchaCode: '!!!!',
+    });
+    assert.equal(bad.status, 401);
+    assert.ok(bad.body.message.includes('验证码不正确'), `应提示验证码不正确，实际：${bad.body.message}`);
+    // 一次性：输错也作废，同一个 id 再用正确答案必须失败（防同号重试爆破）。
+    const retry = await loginWith(cap.ip, {
+      password: config.authPassword,
+      captchaId: cap.id,
+      captchaCode: cap.answer,
+    });
+    assert.equal(retry.status, 401);
+    assert.ok(retry.body.message.includes('失效'), `应提示验证码已失效，实际：${retry.body.message}`);
+  });
+
+  await check('验证码全角输入等价（中文输入法）→ 200', async () => {
+    const cap = await getCaptcha();
+    // 把半角字母数字逐个映射到全角（Ａ → Ａ），模拟中文输入法下的实际输入。
+    const fullWidth = cap.answer.replace(/[A-Z0-9]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 0xfee0));
+    const r = await loginWith(cap.ip, {
+      password: config.authPassword,
+      captchaId: cap.id,
+      captchaCode: fullWidth,
+    });
+    assert.equal(r.status, 200, `全角输入应等价通过，实际 ${r.status}：${r.body.message || ''}`);
+  });
+
   let token = '';
   await check('POST login 正确口令 + 正确验证码 → 200 + token', async () => {
     const cap = await getCaptcha();
