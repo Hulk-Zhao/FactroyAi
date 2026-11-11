@@ -29,7 +29,7 @@
 | 路径 | 作用 |
 | --- | --- |
 | `.github/workflows/build-images.yml` | CI：构建 3 个后端镜像并推送 GHCR |
-| `deploy/orcaterm-quickstart.md` | **OrcaTerm 里照着敲的上线命令清单**（环境检查 → 拉代码 → `.env` → 证书 → 启动 → 验证） |
+| `deploy/orcaterm-quickstart.md` | **OrcaTerm 里照着敲的上线命令清单**（环境检查 → 克隆仓库 → `.env` → 拉镜像并校验 tag → 停机前自检 → 停旧栈/起新栈 → 回滚 → 验证） |
 | `deploy/gz-api/docker-compose.yml` | 广州单机全栈：mfg / APS / PostgreSQL / Redis / Hogo / Nginx |
 | `deploy/gz-api/.env.example` | 服务器环境变量模板（含镜像 tag、灾备静态开关，无真实密钥） |
 | `deploy/gz-api/nginx/templates/api.conf.template` | `api.hulkai.cn` 的 443、CORS、SSE、WebSocket |
@@ -55,6 +55,14 @@ docker compose config --quiet && echo "compose 配置有效"
 ## 2. 上线前准备
 
 - [ ] 仓库已上传到**新的 GitHub 仓库**，默认分支为 `main`，Actions 已启用。
+- [ ] **服务器上 `/opt/hulkai` 已建好、属主是登录用户，仓库已克隆到 `/opt/hulkai/FactroyAi`**：
+      `sudo mkdir -p /opt/hulkai && sudo chown -R "$USER":"$USER" /opt/hulkai`，
+      然后 `cd /opt/hulkai && git clone <新仓库地址> FactroyAi`。
+      没克隆就停旧栈等于站点直接下线：`cd /opt/hulkai/FactroyAi` 报 `No such file or directory`，
+      `docker compose` 报 `no configuration file provided: not found`（2026-11-11 已真实发生过一次）。
+- [ ] 已对齐部署顺序：克隆、`.env`、`docker compose config`、`docker compose pull`、镜像 tag 校验
+      **全部在旧栈运行时完成**；只有「停旧栈 + `up -d`」需要停机（见第 4 节，时间线见
+      [orcaterm-quickstart.md](orcaterm-quickstart.md) 0.1）。
 - [ ] GitHub 账号有 GHCR 写权限（仓库 `Settings → Actions → General → Workflow permissions`
       建议选 `Read and write permissions`）。
 - [ ] 广州服务器已安装 Docker 24+ 与 Compose v2，安全组 / UFW 只放行 `22`、`80`、`443`，
@@ -142,93 +150,274 @@ REGISTRY=local IMAGE_TAG=dev docker compose build
 
 > 在 OrcaTerm 里逐步操作的话，直接按 [orcaterm-quickstart.md](orcaterm-quickstart.md) 敲命令；
 > 本节保留原理与取舍说明。
+>
+> **顺序**：4.1–4.3 是准备，全部在旧栈**运行中**执行（不掉线）；
+> 4.4 是停机前的三项硬门槛；**只有 4.5（停旧栈 + 起新栈）会掉线**；
+> 4.6 是切换失败后立即执行的回滚块，4.7–4.8 在新栈就绪后做。
+> 仓库、`.env`、镜像 tag 任何一项没就绪就停旧栈，会把站点置于长时间下线。
 
 > **数据都在命名卷里，停服禁止 `docker compose down -v`。**
 > `mfg_data`（SQLite + Chroma）、`hulkai_aps_pgdata`（APS 全库）、`hulkai_hogo_runtime`（hogo 密钥）
 > 一旦被 `-v` 删除，只能从备份恢复。落点、旧库迁移、`pg_dump`/卷打包、部署后 30 秒核对
 > 全部见 [data-persistence.md](data-persistence.md)。
 
-### 4.1 环境变量
+### 4.1 准备目录并克隆仓库（第 0 步，不可跳过）
+
+仓库不在服务器上时，后面每条命令都会失败。实测过的三种表现：
+
+| 你执行 | 实际结果 |
+| --- | --- |
+| `cd /opt/hulkai/FactroyAi` | `-bash: cd: /opt/hulkai/FactroyAi: No such file or directory` |
+| 在任意目录 `docker compose up -d` | `no configuration file provided: not found` |
+| 在别的目录恰好有同名 compose | 起错服务，且报错里完全看不出「仓库没克隆」 |
+
+2026-11-11 的线上切换就是这样失败的：旧栈已停、系统 nginx 已停、5 个容器已改名，
+才发现仓库从未克隆，站点因此长时间下线。克隆不占端口、不碰旧容器，**不需要停机**。
 
 ```bash
-sudo mkdir -p /opt/hulkai && sudo chown "$USER" /opt/hulkai
-git clone <新仓库地址> /opt/hulkai/FactroyAi
-cd /opt/hulkai/FactroyAi/deploy/gz-api
+sudo mkdir -p /opt/hulkai
+sudo chown -R "$USER":"$USER" /opt/hulkai
 
+export REPO_URL='<新仓库地址>'
+cd /opt/hulkai
+test -d FactroyAi/.git || git clone "$REPO_URL" FactroyAi
+
+cd /opt/hulkai/FactroyAi/deploy/gz-api
+pwd
+ls -l docker-compose.yml .env.example
+```
+
+必须看到 `pwd` 输出 `/opt/hulkai/FactroyAi/deploy/gz-api`，且能列出 `docker-compose.yml`
+与 `.env.example`；看不到就停下，不要继续。后续更新用 `cd /opt/hulkai/FactroyAi && git pull --ff-only`。
+
+### 4.2 环境变量（旧栈运行中做）
+
+```bash
+cd /opt/hulkai/FactroyAi/deploy/gz-api
 cp .env.example .env
+chmod 600 .env
 vi .env
 ```
 
-`.env.example` 是完整键清单，至少确认下面几组：
+`.env.example` 是完整键清单。必填键、缺失后果与生成方式：
 
-| 分组 | 键 | 说明 |
-| --- | --- | --- |
-| 镜像 | `REGISTRY`、`IMAGE_TAG` | 从 CI Summary 复制；`IMAGE_TAG` 固定 sha |
-| 拓扑 | `API_DOMAIN`、`SITE_DOMAIN`、`SITE_ORIGIN_PRIMARY`、`SITE_ORIGIN_WWW`、`NGINX_CONF` | 默认已是 `hulkai.cn` 体系 |
-| 静态源站（灾备） | `SERVE_STATIC_ORIGIN`、`SITE_ROOT` | 默认 `0`（静态在 COS）；仅切回自有源时设 `1`，`SITE_ROOT` 只在 `=1` 时生效 |
-| 端口 | `MFG_HOST_PORT`、`APS_BACKEND_PORT` | 只绑 `127.0.0.1`，用于排障 |
-| mfg | `AUTH_SECRET`、`MFG_ADMIN_PASS`、`DS_KEY`、`QW_KEY`、`DASHSCOPE_API_KEY`、`RERANK_API_KEY` | 上线前必须填/改 |
-| APS | `APS_DB_PASSWORD`、`APS_SECURITY_JWT_SECRET`、`APS_ADMIN_INIT_PASSWORD`、`APS_SECURITY_WS_ALLOWED_ORIGINS` | JWT 至少 32 字节随机串 |
-| Hogo | `HOGO_AUTH_PASSWORD`、`HOGO_AUTH_SECRET` | 口令必须改；secret 留空则自动生成 |
+| 分组 | 键 | 必填 | 缺失 / 保留占位符的现象 |
+| --- | --- | --- | --- |
+| 镜像 | `REGISTRY`、`IMAGE_TAG` | 是 | `REGISTRY` 未替换：compose 插值报错，**一个容器都起不来**；tag 不存在：`pull`/`up` 失败 |
+| 拓扑 | `API_DOMAIN`、`SITE_DOMAIN`、`SITE_ORIGIN_PRIMARY`、`SITE_ORIGIN_WWW`、`NGINX_CONF` | 是（默认值可直接用） | 证书文件名对不上导致 nginx 起不来；跨域预检不带 `access-control-allow-origin` |
+| 静态源站（灾备） | `SERVE_STATIC_ORIGIN`、`SITE_ROOT` | 是（默认 `0`） | 设 `1` 但缺 `hulkai.cn` 证书 → nginx `Exited (1)`；`SITE_ROOT` 只在 `=1` 时生效 |
+| 端口 | `MFG_HOST_PORT`、`APS_BACKEND_PORT` | 是（默认即可） | 与旧容器/系统 nginx 冲突时报 `port is already allocated` |
+| mfg | `AUTH_SECRET` | 是 | 每次重启旧登录态失效，表现为「刚登录就 401」 |
+| mfg | `MFG_ADMIN_PASS` | 是 | 保留默认口令仍能启动，但后台可用默认口令登录 |
+| mfg | `QW_KEY`、`DASHSCOPE_API_KEY`、`RERANK_API_KEY` | 是（重排仅在 `RERANK_ENABLED=true` 时需要） | 检索/向量化 401/403，知识库与案例匹配不可用（`/health` 仍可能 200） |
+| mfg | `DS_KEY` | 是 | 对话/分析/报告接口 401 或 5xx |
+| APS | `APS_DB_NAME`、`APS_DB_USER`、`APS_DB_PASSWORD` | 复用旧卷时必须与旧 PG 一致 | `aps-backend` 反复重启：日志 `password authentication failed` 或 `database "aps" does not exist`（数据其实还在） |
+| APS | `APS_SECURITY_JWT_SECRET` | 是 | 空值：JWT 可被伪造，或登录后立刻 401 |
+| APS | `APS_ADMIN_INIT_PASSWORD` | 是（首次初始化写入） | 保留默认口令，admin 账号可被猜解 |
+| APS | `APS_SECURITY_WS_ALLOWED_ORIGINS` | 是 | Origin 不在白名单 → WebSocket 403，求解进度不刷新 |
+| Hogo | `HOGO_AUTH_PASSWORD` | 是 | 保留默认口令，演示门禁可被默认口令进入 |
+| Hogo | `HOGO_AUTH_SECRET` | 否 | 留空则首启自动生成并写入卷 `hulkai_hogo_runtime`；卷被删且仍留空 → 会话全部失效 |
+
+生成方式：`AUTH_SECRET`、`APS_SECURITY_JWT_SECRET`、`APS_DB_PASSWORD` 用
+`openssl rand -hex 32`（不要手抄、不要复用）；其余口令自定义强口令，API key 从对应控制台取。
+逐键说明见 [orcaterm-quickstart.md](orcaterm-quickstart.md) 第 4 节。
+
+**复用旧数据卷时（保留 `hulkai_aps_pgdata`）**：PG 的库名/用户/口令在**第一次初始化时就写进数据目录**，
+`.env` 必须与旧容器一致，否则新容器连不上（报错看起来像「数据没了」，实际是认证/库名不符）：
+
+```bash
+docker inspect hulkai_aps_postgres-pre-switch \
+  --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^POSTGRES_(DB|USER|PASSWORD)='
+# 把输出的三个值原样写进 .env 的 APS_DB_NAME / APS_DB_USER / APS_DB_PASSWORD
+```
+
+检查必填项有没有漏（无输出即通过）：
+
+```bash
+grep -nE '^(AUTH_SECRET|MFG_ADMIN_PASS|QW_KEY|DS_KEY|DASHSCOPE_API_KEY|APS_DB_PASSWORD|APS_SECURITY_JWT_SECRET|HOGO_AUTH_PASSWORD)=$' .env
+grep -n 'change-me' .env
+grep -n 'your-github-name' .env      # 有输出说明 REGISTRY 还没换
+```
 
 `.env` 已被 `.gitignore` 覆盖；不要提交、不要打进镜像、不要写进前端产物。
 
-### 4.2 登录 GHCR 并拉取
+### 4.3 登录 GHCR、拉镜像并校验 tag（旧栈运行中做）
 
 ```bash
 # 私有包才需要；Token 只勾 read:packages
 echo "$GHCR_READ_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
 
 cd /opt/hulkai/FactroyAi/deploy/gz-api
-docker compose config --quiet          # 校验 REGISTRY / IMAGE_TAG 已生效
-docker compose pull                    # 只拉取，不构建
+docker compose config --quiet          # 只解析配置：仓库/.env/变量插值一次暴露
+docker compose pull                    # 只拉取，不构建，不影响运行中的旧栈
 ```
 
 如果 `pull` 报 `unauthorized`：检查 token 是否过期、是否勾选 `read:packages`、
 包是否私有（GitHub → 个人/组织 → Packages → 该包 → Visibility）。
 
-### 4.3 先起 HTTP 模式做冒烟
-
-证书就绪前不要直接上 443，否则 Nginx 会因缺证书启动失败。
+**逐个确认三个镜像的 tag 真实存在**（缺一个，`up` 会在停机后才失败）：
 
 ```bash
-COMPOSE_PARALLEL_LIMIT=1 NGINX_CONF=api.http docker compose up -d --no-build
+REGISTRY=$(grep -E '^REGISTRY=' .env | cut -d= -f2)
+TAG=$(grep -E '^IMAGE_TAG=' .env | cut -d= -f2)
+for svc in mfg-api aps-backend hogo-qa; do
+  docker manifest inspect "$REGISTRY-$svc:$TAG" >/dev/null \
+    && echo "ok   $svc:$TAG" \
+    || echo "MISS $svc:$TAG  ← 这个 tag 不存在，先不要停旧栈"
+done
+```
+
+本地 build 兜底时没有远端 tag，改为确认 `docker images` 里三个镜像都在。
+
+### 4.4 停机前硬门槛（三项，缺一不可）
+
+在旧栈仍在运行时执行，**全部通过才允许进入 4.5**：
+
+```bash
+cd /opt/hulkai/FactroyAi/deploy/gz-api
+
+# 1) 仓库在
+test -f docker-compose.yml && echo 'gate1 repo ok' || echo 'gate1 FAIL: 仓库没克隆，回 4.1'
+
+# 2) .env 在且必填项非空
+test -f .env && echo 'gate2 env exists' || echo 'gate2 FAIL: 没有 .env'
+grep -nE '^(AUTH_SECRET|MFG_ADMIN_PASS|QW_KEY|DS_KEY|DASHSCOPE_API_KEY|APS_DB_PASSWORD|APS_SECURITY_JWT_SECRET|HOGO_AUTH_PASSWORD)=$' .env \
+  && echo 'gate2 FAIL: 上面这些键还是空的'
+
+# 3) 三个镜像 tag 都存在（本地 build 场景改为 docker images 确认）
+REGISTRY=$(grep -E '^REGISTRY=' .env | cut -d= -f2)
+TAG=$(grep -E '^IMAGE_TAG=' .env | cut -d= -f2)
+for svc in mfg-api aps-backend hogo-qa; do
+  docker manifest inspect "$REGISTRY-$svc:$TAG" >/dev/null && echo "gate3 ok  $svc:$TAG" || echo "gate3 FAIL: $svc:$TAG 不存在"
+done
+```
+
+再补两个「配件」检查（同样不停机）：
+
+```bash
+docker compose config --quiet && echo 'compose 配置有效'
+ls -l certs/api.hulkai.cn.pem certs/api.hulkai.cn.key 2>/dev/null || echo '无证书 → 本次必须走 NGINX_CONF=api.http'
+```
+
+任一项 FAIL：**回准备阶段，旧栈保持运行**。此时站点还在，不要往下走。
+
+### 4.5 停旧栈 → 起新栈（唯一需要停机的步骤）
+
+**前提**：4.4 三项门槛全绿。此时才开始掉线；任何一项没过都不要执行本节。
+没有证书时先把 `.env` 的 `NGINX_CONF` 设为 `api.http`（见 4.7），否则 nginx 会因缺证书起不来。
+
+```bash
+cd /opt/hulkai/FactroyAi/deploy/gz-api
+
+# 1) 先停入口（系统 nginx 只有 listen 80 一个 server 块，占着 80）
+sudo systemctl disable --now nginx
+sudo ss -lntp | grep -E ':80 |:443 ' || echo '80/443 已释放'
+
+# 2) 先应用、再缓存、最后数据库（保证 PG 干净关闭）
+docker stop mfg_app hulkai_aps_backend hulkai_hogo_qa
+docker stop mfg_redis
+docker stop hulkai_aps_postgres
+
+# 3) 只改名不删除：回滚时可直接 start 回来
+for c in mfg_app mfg_redis hulkai_aps_postgres hulkai_aps_backend hulkai_hogo_qa; do
+  docker rename "$c" "$c-pre-switch"
+done
+docker ps -a --format '{{.Names}}' | grep -E '^(mfg_app|mfg_redis|hulkai_aps_postgres|hulkai_aps_backend|hulkai_hogo_qa)$' \
+  && echo '名字还没腾空' || echo '容器名已腾空'
+
+# 4) 起新栈
+COMPOSE_PARALLEL_LIMIT=1 docker compose up -d --no-build
 docker compose ps
 docker compose logs -f app          # 首次建 2594 条向量索引，1–3 分钟
-docker compose logs -f aps-backend  # 首次跑 Flyway，约 1–2 分钟
+docker compose logs -f aps-backend  # 首次跑 Flyway，39 张表，1–2 分钟
 ```
 
-后端就绪后，用宿主机回环端口验证（不经过公网）：
+> 旧容器名与新 compose 的 `container_name` 完全相同（`mfg_app` / `mfg_redis` /
+> `hulkai_aps_postgres` / `hulkai_aps_backend` / `hulkai_hogo_qa`），不改名 `up` 会报
+> `name already in use`；80/8004/8085 也必须先释放。**全程只 `rename`，不 `rm`，不加 `-v`**。
+
+60 秒内做健康检查（回环端口，不经过公网）：
 
 ```bash
+docker compose ps                                  # 三个服务 healthy
 curl -fsS http://127.0.0.1:8004/api/v2/health
 curl -fsS http://127.0.0.1:8085/api/v1/health
-docker compose exec nginx wget -qO- http://hogo-qa:8788/api/health
-curl -H 'Host: api.hulkai.cn' http://127.0.0.1/healthz   # ok
+docker compose exec -T nginx wget -qO- http://hogo-qa:8788/api/health
+curl -fsS -H 'Host: api.hulkai.cn' http://127.0.0.1/healthz
 ```
 
-### 4.4 放置证书并切 HTTPS
+任一不通过：**不要开始排查**，立即执行 4.6 回滚，恢复访问后再查日志。
+
+### 4.6 回滚（切换失败立即执行）
+
+```bash
+# 1) 拆掉新栈（不加 -v，新栈卷里的数据也不删）
+if [ -f /opt/hulkai/FactroyAi/deploy/gz-api/docker-compose.yml ]; then
+  ( cd /opt/hulkai/FactroyAi/deploy/gz-api && docker compose down )
+fi
+
+# 2) 按依赖顺序把旧容器 start 回来
+docker start hulkai_aps_postgres-pre-switch
+sleep 5
+docker start mfg_redis-pre-switch
+docker start mfg_app-pre-switch hulkai_aps_backend-pre-switch hulkai_hogo_qa-pre-switch
+
+# 3) 恢复系统 nginx（占回 80）
+sudo systemctl enable --now nginx
+systemctl is-active nginx
+
+# 4) 三条健康检查
+sleep 3
+curl -fsS http://127.0.0.1:8004/api/v2/health
+curl -fsS http://127.0.0.1:8085/api/v1/health
+curl -s -o /dev/null -w 'nginx:%{http_code}\n' http://127.0.0.1/
+```
+
+回滚期间**不要**执行 `docker compose down -v`、`docker volume rm`、`docker system prune`
+——旧数据全在 `mfg_data` / `hulkai_aps_pgdata` / `hulkai_hogo_runtime` 里。
+
+### 4.7 放置证书并切 HTTPS
+
+证书就绪前保持 `NGINX_CONF=api.http`：只监听 80，不占 443，能先把三个后端和路由验通。
+没有证书却直接用 `NGINX_CONF=api`，nginx 会因加载证书失败而起不来。
 
 一张 `*.hulkai.cn` 泛域名证书，按用途改名放入 `certs/`：
 
 ```bash
+cd /opt/hulkai/FactroyAi/deploy/gz-api
 mkdir -p certs
 # api 网关（必需，api 直连本机，不走 CDN）
 #   certs/api.hulkai.cn.pem  / certs/api.hulkai.cn.key
 # 静态源站灾备（仅 SERVE_STATIC_ORIGIN=1 时需要）
 #   certs/hulkai.cn.pem      / certs/hulkai.cn.key   必须包含 www.hulkai.cn SAN
 chmod 600 certs/*.key
+chmod 644 certs/*.pem
+ls -l certs/
+```
 
+证书文件名必须等于 `.env` 里的 `API_DOMAIN` / `SITE_DOMAIN`。冒烟通过后切回正式配置：
+
+```bash
+ls -l certs/api.hulkai.cn.pem certs/api.hulkai.cn.key          # 两个文件都在
+openssl x509 -in certs/api.hulkai.cn.pem -noout -checkend 0     # 未过期
+openssl x509 -in certs/api.hulkai.cn.pem -noout -ext subjectAltName   # 覆盖 api.hulkai.cn
+sed -i 's/^NGINX_CONF=.*/NGINX_CONF=api/' .env
 docker compose up -d --no-build nginx
+docker compose ps nginx
 # 默认应为 1（只有 api 的 443）；灾备模式应为 2
 docker compose exec nginx grep -c 'listen 443 ssl' /etc/nginx/conf.d/*.conf
 ```
 
-证书文件名必须等于 `.env` 里的 `API_DOMAIN` / `SITE_DOMAIN`。
-容器启动时会先跑 `nginx -t`；证书缺失或与域名不匹配会直接退出，
-`docker compose logs nginx` 里能看到具体是哪个文件。
+> **切回 `api` 时证书缺失会让 nginx 快速失败**：容器入口先跑 `nginx -t`，证书缺失、
+> 文件名与 `API_DOMAIN` 不符、私钥权限错、`.pem` 不是完整链，都会让它**立即退出**
+> （`docker compose ps` 显示 `Exited (1)`）。80 也由这个容器监听，所以**80 会一起消失**，
+> 站点直接不可访问（旧栈的系统 nginx 在 4.5 已停掉，没有兜底）。
+> 失败处理：`docker compose logs --tail=50 nginx` 看是哪个文件，然后
+> `sed -i 's/^NGINX_CONF=.*/NGINX_CONF=api.http/' .env && docker compose up -d nginx`
+> 先把 80 保回来，再修证书。
+> 只放证书、不改 `NGINX_CONF` 不会生效——配置模板是在容器启动时按该变量渲染的。
 
-### 4.5 验证 API
+### 4.8 验证 API
 
 DNS 还没切到本机时，给每条 `curl` 加 `--resolve api.hulkai.cn:443:129.204.108.45`，
 避免请求仍打到香港旧栈。
@@ -341,7 +530,7 @@ curl -s -H 'Host: hulkai.cn' https://hulkai.cn.cdn.dnsv1.com/ | head -n 5
 
 ### 6.2 顺序（不要在一天内全做完）
 
-1. **先加 `api` A 记录**，用 `curl --resolve` 跑通「4.5」。此时站点仍指向香港，可随时回退。
+1. **先加 `api` A 记录**，用 `curl --resolve` 跑通「4.8」。此时站点仍指向香港，可随时回退。
 2. **再确认 `hulkai.cn` 加速域名**：源站类型 COS 源、桶 `hulkai-cdn-1301421942`、
    回源 HOST 为桶域名、回源协议 HTTP、私有桶访问已授权（见 7.1）。
 3. **切 `@` 到 `hulkai.cn.cdn.dnsv1.com`**。此时新访客走新链路，老访客按旧 TTL 逐步收敛。
@@ -723,7 +912,7 @@ docker compose up -d --no-build
 
 **Q：页面能打开，但接口全部 CORS 报错？**
 检查请求的 `Origin` 是否在 `.env` 的 `SITE_ORIGIN_PRIMARY` / `SITE_ORIGIN_WWW` 中；
-改完执行 `docker compose up -d --no-build nginx` 重新渲染模板，再用 4.5 的 `OPTIONS` 验证。
+改完执行 `docker compose up -d --no-build nginx` 重新渲染模板，再用 4.8 的 `OPTIONS` 验证。
 
 **Q：APS 进度条不动，控制台 WebSocket 403？**
 `APS_SECURITY_WS_ALLOWED_ORIGINS` 必须包含浏览器地址栏的 Origin
