@@ -37,6 +37,8 @@
 | `deploy/gz-api/nginx/templates/site-origin.conf.template` | **灾备**：`hulkai.cn`/`www` 静态源站，仅 `SERVE_STATIC_ORIGIN=1` 时启用 |
 | `deploy/gz-api/nginx/realip.conf` | 自有源灾备时的 CDN 回源真实 IP 段（默认空名单） |
 | `deploy/cos/publish.ps1` | 构建 3 个前端 → 组装整站 → `coscli sync` 上传 COS |
+| `deploy/data-persistence.md` | **数据落点 / 旧库迁移 / 备份恢复 / 部署后核对清单**（含 `down -v` 禁用说明） |
+| `deploy/gz-api/backup.sh` | 一键备份：APS `pg_dump` + mfg SQLite 在线备份 + hogo 运行时 |
 | `deploy/hk-web/` | **已退役**，仅保留为回滚参考，新链路不引用 |
 
 `deploy/gz-api` 的运行只依赖同仓库的 `projects/` 目录与公共镜像（redis / postgres / nginx），
@@ -140,6 +142,11 @@ REGISTRY=local IMAGE_TAG=dev docker compose build
 
 > 在 OrcaTerm 里逐步操作的话，直接按 [orcaterm-quickstart.md](orcaterm-quickstart.md) 敲命令；
 > 本节保留原理与取舍说明。
+
+> **数据都在命名卷里，停服禁止 `docker compose down -v`。**
+> `mfg_data`（SQLite + Chroma）、`hulkai_aps_pgdata`（APS 全库）、`hulkai_hogo_runtime`（hogo 密钥）
+> 一旦被 `-v` 删除，只能从备份恢复。落点、旧库迁移、`pg_dump`/卷打包、部署后 30 秒核对
+> 全部见 [data-persistence.md](data-persistence.md)。
 
 ### 4.1 环境变量
 
@@ -578,6 +585,9 @@ CDN 回源 COS 持续 5xx，或需要临时验证一份新构建而不想改动�
 - [ ] 浏览器 Network 中 API 请求的 `Origin` 为站点域名，响应带 `access-control-allow-origin`。
 - [ ] 刷新页面后 `index.html` 返回 200 且 `Age` 很小或不存在（未被 CDN 缓存）。
 - [ ] `https://api.hulkai.cn/` 根路径跳回 `https://hulkai.cn/`。
+- [ ] **数据完整**：三个命名卷都在，APS/mfg 关键行数不少于迁移前，详见
+      [data-persistence.md §6](data-persistence.md#6-部署前后核对清单30-秒判断数据是否完整)：
+      `docker compose ps` 全 `running`、`docker volume ls | grep -E 'mfg_data|hulkai_aps_pgdata|hulkai_hogo_runtime'`。
 
 排障命令：
 
@@ -656,6 +666,9 @@ docker compose up -d --no-build
 
 如果旧镜像还在本地，可以跳过 `pull`，直接 `docker compose up -d --no-build`。
 三个镜像共用同一个 tag，整体回滚不会出现版本错配。
+
+> 只回滚镜像不动数据卷；**不要**在回滚时顺手 `docker compose down -v`。
+> 若需要连数据一起回到某个时间点，按 [data-persistence.md §5](data-persistence.md#5-备份与恢复) 恢复备份。
 
 ### 10.2 静态站
 

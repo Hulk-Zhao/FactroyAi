@@ -4,6 +4,10 @@
     Seed (or clean) the idempotent M1 closed-loop demo dataset in the local PostgreSQL.
 
 .DESCRIPTION
+    Windows / local usage only. On Linux servers (Ubuntu) use seed-m1-demo.sql instead,
+    which carries the same dataset with dates computed relative to import time, and is
+    wired into compose as the one-shot `aps-seed` service.
+
     The script talks to PostgreSQL directly with psql (not through the application API),
     because master-data writes need explicit tenant_id / version / deleted values and
     fixed UUIDs so the demo stays reproducible and cleanable. Every column used here is

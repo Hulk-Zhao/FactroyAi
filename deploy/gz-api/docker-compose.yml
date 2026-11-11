@@ -10,6 +10,11 @@ name: hulkai-gz-api
 #
 # 前端静态资源不在这台机器上：由 deploy/cos 上传到 COS + CDN。
 # 所有后端端口只绑定 127.0.0.1，供排障用；公网安全组只需放行 22/80/443。
+#
+# 【数据安全】mfg 的 SQLite/Chroma 在卷 mfg_data，APS 在 hulkai_aps_pgdata，
+# hogo 密钥在 hulkai_hogo_runtime。停服只能用 `docker compose stop` 或 `down`，
+# 禁止 `docker compose down -v`（会删卷 = 清空全部业务数据）。
+# 落点、迁移、备份与核对见 deploy/data-persistence.md。
 # =============================================================================
 
 services:
@@ -148,7 +153,7 @@ services:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/v1/health"]
       interval: 30s
       timeout: 10s
-      # 首次启动要跑 Flyway（28 张表），给足冷启动时间
+      # 首次启动要跑 Flyway（39 张表），给足冷启动时间
       start_period: 180s
       retries: 3
     logging:
@@ -156,6 +161,46 @@ services:
       options:
         max-size: "20m"
         max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # APS 演示数据（一次性任务，不在 `up -d` 里自动运行）
+  #   docker compose --profile seed run --rm aps-seed
+  # 依赖 aps-backend healthy：Flyway 已把 39 张表建好，psql 才能插入。
+  # SQL 幂等（projects/smart-aps-agent/scripts/seed-m1-demo.sql）：
+  #   已有演示数据 → 打印 SKIP；缺数据 → 补齐后打印 SEEDED；
+  #   失败 → 事务回滚、打印 FAIL 并以非 0 退出。
+  # ---------------------------------------------------------------------------
+  aps-seed:
+    image: postgres:15
+    profiles: ["seed"]
+    depends_on:
+      aps-backend:
+        condition: service_healthy
+    environment:
+      PGHOST: aps-postgres
+      PGPORT: "5432"
+      PGDATABASE: ${APS_DB_NAME:-aps}
+      PGUSER: ${APS_DB_USER:-aps}
+      PGPASSWORD: ${APS_DB_PASSWORD:-aps_demo_pwd_2026}
+      TZ: Asia/Shanghai
+    volumes:
+      - ../../projects/smart-aps-agent/scripts/seed-m1-demo.sql:/seed/seed-m1-demo.sql:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        psql -v ON_ERROR_STOP=1 -q -t -A -f /seed/seed-m1-demo.sql
+        rc=$$?
+        if [ "$$rc" -ne 0 ]; then
+          echo "FAIL: APS 演示数据导入失败（psql 退出码 $$rc），事务已回滚，详见上方错误"
+        fi
+        exit $$rc
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
 
   # ---------------------------------------------------------------------------
   # Hogo-QA-tool：SPC 质量分析工具的演示门禁 / 样例数据后端。

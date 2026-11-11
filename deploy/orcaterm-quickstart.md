@@ -195,13 +195,53 @@ docker compose ps
 首次启动较慢，属正常：
 
 - `app`：构建 2594 条向量索引，约 1–3 分钟；
-- `aps-backend`：Flyway 建 28 张表，约 1–2 分钟；
+- `aps-backend`：Flyway 建 39 张表，约 1–2 分钟；
 - `hogo-qa`：秒级。
 
 ```bash
 docker compose logs -f app          # Ctrl+C 退出
 docker compose logs -f aps-backend
 ```
+
+### 6.1 导入 APS 演示数据（首次一次，可选）
+
+`aps-backend` 变成 `healthy` 之后，表结构（39 张表）才算就位。此时才导演示数据，
+**不要**把种子放进 PG 镜像的初始化目录（那时 Flyway 还没建表）。
+
+先判断要不要导：
+
+```bash
+cd /opt/hulkai/FactroyAi/deploy/gz-api
+docker compose exec -T aps-postgres psql -U aps -d aps -Atc "
+select 'tables='||count(*) from information_schema.tables where table_schema='public';
+select 'demo_orders='||count(*) from orders
+ where id::text like 'd0000000-0000-0000-0000-0000000007%';"
+```
+
+- `tables` 不到 39 或报 `relation "orders" does not exist`：后端还没迁移完，先看 6 节日志；
+- `tables=39`、`demo_orders=0`：需要导入；
+- `demo_orders=9`：已在，跳过这一步即可。
+
+导入（幂等，重复执行安全；`up -d` 不会自动跑它）：
+
+```bash
+docker compose --profile seed run --rm aps-seed
+```
+
+最后一行就是结论：
+
+| 输出 | 含义 |
+| --- | --- |
+| `SEEDED: APS 演示数据已导入（... orders=9 ...）` | 本次导入成功 |
+| `SKIP: APS 演示数据已存在（9/9 演示订单齐全），本次未做任何修改` | 已有数据，什么都没动 |
+| `FAIL: APS 演示数据导入失败（psql 退出码 N）...` | 事务已回滚，按上方 `ERROR` 排查 |
+
+日期是按执行当天算的：订单交期 = 当天 + 3…10 天，单号 `SO-<当天>-000N`，
+日历/工艺路线/BOM/策略生效日 = 当天。隔天不会自动改期；要刷新演示日期，先按
+[data-persistence.md 6.3.2](data-persistence.md#632-两条路径的取舍) 清演示订单，再导一次。
+
+> 本地 Windows 开发仍用 `.\scripts\seed-m1-demo.ps1`（带 `-Clean`，还会顺带起本地库）；
+> 服务器不要装 `pwsh`，直接用上面的 `aps-seed`。两条路径的数据内容与固定 UUID 完全一致。
 
 如果证书还没准备好，先用 HTTP 模式冒烟（不占 443）：
 
@@ -226,6 +266,11 @@ docker compose images                 # 确认镜像 tag 就是 .env 里的 IMAG
 curl -fsS http://127.0.0.1:8004/api/v2/health
 curl -fsS http://127.0.0.1:8085/api/v1/health
 docker compose exec nginx wget -qO- http://hogo-qa:8788/api/health
+
+# APS：39 张表 + 演示数据是否在位（6.1 导入后应为 tables=39、demo_orders=9）
+docker compose exec -T aps-postgres psql -U aps -d aps -Atc "
+select 'tables='||count(*) from information_schema.tables where table_schema='public';
+select 'demo_orders='||count(*) from orders where id::text like 'd0000000-0000-0000-0000-0000000007%';"
 ```
 
 ### 7.2 `api.hulkai.cn`
@@ -318,6 +363,11 @@ docker compose up -d --no-build
 ```
 
 > 镜像 tag 与提交一一对应，三个服务共用同一个 tag，整体回滚即可。
+>
+> **数据不要动**：业务数据在命名卷 `mfg_data` / `hulkai_aps_pgdata` / `hulkai_hogo_runtime`，
+> 回滚镜像不涉及它们。**禁止 `docker compose down -v`**（会删卷）。
+> 迁移旧库、备份恢复、部署后 30 秒核对见 [data-persistence.md](data-persistence.md)；
+> 日常备份在服务器执行 `bash deploy/gz-api/backup.sh`。
 
 ---
 
