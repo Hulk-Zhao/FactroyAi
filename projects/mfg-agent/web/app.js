@@ -817,7 +817,19 @@
   }
 
   const api = {
-    base() { return state.backend.base; },
+    /** 后端基址。**config.js 的 window.MFG_API_BASE 优先**：
+     *  静态站托管在 COS/CDN 时页面与 API 不同源，而探针是异步的——
+     *  首屏登录验证码在探针完成前就发出，若只看 state.backend.base（当时还是 ""），
+     *  请求会退化成相对路径 /api/...，打到静态域名后被 COS 当成对象 key 返回
+     *  NoSuchKey 404。未配置时仍回落到 state.backend.base（空串 = 同源相对路径），
+     *  容器内直连部署行为不变。 */
+    base() {
+      const configured = (typeof window !== "undefined"
+        && typeof window.MFG_API_BASE === "string")
+        ? window.MFG_API_BASE.trim().replace(/\/+$/, "")
+        : "";
+      return configured || state.backend.base;
+    },
     online() { return state.backend.online; },
 
     /** 探测后端：**同源优先**，同源不可用才竞速本机 8004；全部失败 → 演示模式。

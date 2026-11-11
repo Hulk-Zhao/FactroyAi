@@ -845,9 +845,19 @@
     } catch (err) {
       sameOrigin = "";
     }
+    // 配置了 window.MFG_API_BASE（静态站走 COS/CDN）时页面与 API 不同源，
+    // 同源 /api/... 只会被 COS 当成对象 key 返回 404，直接用配置基址。
+    const configured = (typeof window !== "undefined"
+      && typeof window.MFG_API_BASE === "string")
+      ? window.MFG_API_BASE.trim().replace(/\/+$/, "")
+      : "";
     const bases = [];
-    if (sameOrigin) bases.push(sameOrigin);
-    if (base && base !== sameOrigin) bases.push(base);
+    if (configured) {
+      bases.push(configured);
+    } else {
+      if (sameOrigin) bases.push(sameOrigin);
+      if (base && base !== sameOrigin) bases.push(base);
+    }
     const attempt = function (idx) {
       if (idx >= bases.length) {
         return Promise.resolve(degrade("接口不可用（T04 装载层端点未就绪或无权限）"));
@@ -1273,9 +1283,18 @@
     } catch (err) {
       sameOrigin = "";
     }
+    // 同 story()：静态站配置了 MFG_API_BASE 时，不要先打同源静态域名。
+    const configured = (typeof window !== "undefined"
+      && typeof window.MFG_API_BASE === "string")
+      ? window.MFG_API_BASE.trim().replace(/\/+$/, "")
+      : "";
     const bases = [];
-    if (sameOrigin) bases.push(sameOrigin);
-    if (base && base !== sameOrigin) bases.push(base);
+    if (configured) {
+      bases.push(configured);
+    } else {
+      if (sameOrigin) bases.push(sameOrigin);
+      if (base && base !== sameOrigin) bases.push(base);
+    }
     const attempt = function (idx) {
       if (idx >= bases.length) {
         return Promise.resolve(degrade("接口不可用（T16 回放端点未就绪或无权限）"));
