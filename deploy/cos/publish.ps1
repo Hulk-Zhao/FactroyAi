@@ -113,8 +113,18 @@ New-Item -ItemType Directory -Path $workDir | Out-Null
 
 Copy-Item -Path (Join-Path $repoRoot 'site\public\*') -Destination $workDir -Recurse -Force
 Copy-Item -Path (Join-Path $repoRoot 'projects\mfg-agent\web') -Destination (Join-Path $workDir 'demo\mfg') -Recurse -Force
-Copy-Item -Path (Join-Path $hogoDist '*') -Destination (Join-Path $workDir 'demo\hogo-qa') -Recurse -Force
-Copy-Item -Path (Join-Path $apsDist '*') -Destination (Join-Path $workDir 'demo\mfg-agent-platform') -Recurse -Force
+
+# 逐个复制子项：PowerShell 5.1 在目标目录不存在时用 "src\*" 会把子目录内容摊平，
+# 导致 assets/ 丢失、index.html 里的 /demo/<app>/assets/ 路径 404。
+foreach ($pair in @(
+    @{ Src = $hogoDist; Dst = (Join-Path $workDir 'demo\hogo-qa') },
+    @{ Src = $apsDist;  Dst = (Join-Path $workDir 'demo\mfg-agent-platform') }
+)) {
+    New-Item -ItemType Directory -Path $pair.Dst -Force | Out-Null
+    Get-ChildItem -Path $pair.Src -Force | ForEach-Object {
+        Copy-Item -Path $_.FullName -Destination $pair.Dst -Recurse -Force
+    }
+}
 
 # 静态页面与 API 不同源：写入部署期 API 基址（覆盖源码里的空串）
 $mfgConfig = Join-Path $workDir 'demo\mfg\config.js'
