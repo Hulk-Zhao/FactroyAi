@@ -38,7 +38,8 @@ services:
       args:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.cloud.tencent.com/pypi/simple}
         PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim-bookworm}
-    image: ${REGISTRY:?请先在 .env 配置 REGISTRY（如 ghcr.io/your-name/your-repo）}/mfg-api:${IMAGE_TAG:-latest}
+    # 必须与 CI 的推送形态逐字一致：前缀 + "-mfg-api"（不是 /mfg-api）
+    image: ${REGISTRY:?请先在 .env 配置 REGISTRY（如 ghcr.io/your-name/your-repo）}-mfg-api:${IMAGE_TAG:-latest}
     container_name: mfg_app
     # 密钥从部署目录本地的 .env 读取（模板见 deploy/gz-api/.env.example）
     env_file: .env
@@ -113,7 +114,8 @@ services:
       args:
         # 国内构建直连 Maven Central 易被 TLS 中断；可用 .env 覆盖为其它镜像
         MAVEN_MIRROR_URL: ${APS_MAVEN_MIRROR_URL:-https://maven.aliyun.com/repository/public}
-    image: ${REGISTRY}/aps-backend:${IMAGE_TAG:-latest}
+    # 与 CI 推送一致：前缀 + "-aps-backend"
+    image: ${REGISTRY}-aps-backend:${IMAGE_TAG:-latest}
     container_name: hulkai_aps_backend
     depends_on:
       aps-postgres:
@@ -212,7 +214,8 @@ services:
       args:
         # 容器内构建的静态产物不再对外提供，基路径保持默认即可
         HOGO_BASE: /demo/hogo-qa/
-    image: ${REGISTRY}/hogo-qa:${IMAGE_TAG:-latest}
+    # 与 CI 推送一致：前缀 + "-hogo-qa"
+    image: ${REGISTRY}-hogo-qa:${IMAGE_TAG:-latest}
     container_name: hulkai_hogo_qa
     environment:
       TZ: Asia/Shanghai

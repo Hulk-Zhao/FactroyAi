@@ -108,6 +108,8 @@ docker compose config --quiet && echo "compose 配置有效"
   `invalid reference format ... must be lowercase`。
 - `sha-<7 位>` 与**触发构建的提交**一一对应（不是仓库 HEAD），三个镜像共用同一个 tag，便于整体回滚。
   只改 `deploy/`、`docs/` 的提交不会触发构建，也不会产出 tag。
+- compose 用的就是上表形态：`${REGISTRY}-mfg-api` / `${REGISTRY}-aps-backend` / `${REGISTRY}-hogo-qa`，
+  服务名用 `-` 连接。**不要写成 `${REGISTRY}/mfg-api`**——GHCR 里那是另一个嵌套仓库，会拉不到镜像。
 - 同时推送 `:latest`，但**生产只用 sha tag**，避免“不知道跑的是哪次提交”。
 - 每次 CI 结束，Actions 的 Summary 会直接打印本次三个完整镜像名和服务器 `.env` 两行配置，
   复制即可。
@@ -269,8 +271,10 @@ grep '^REGISTRY=' .env
 
 > `docker login -u "$GHCR_USERNAME"` 的用户名**可以大写**（账号名），只有镜像路径必须小写。
 
-如果 `pull` 报 `unauthorized`：检查 token 是否过期、是否勾选 `read:packages`、
+如果 `pull` 报 `unauthorized`（401）：检查 token 是否过期、是否勾选 `read:packages`、
 包是否私有（GitHub → 个人/组织 → Packages → 该包 → Visibility）。
+**401 不能用来判断镜像是否存在**——GHCR 对未认证请求一律 401，私有包匿名拉取也是 401；
+确认存在必须登录后 `docker manifest inspect`，返回 `not found` / `manifest unknown` 才是真的不存在。
 
 **`IMAGE_TAG` 必须取「最近一次真正触发构建的提交」，不能用 `git rev-parse --short=7 HEAD`。**
 workflow 有 `paths` 过滤，只改 `docs/`、`deploy/`、README 的提交不构建镜像
@@ -291,6 +295,17 @@ grep '^IMAGE_TAG=' .env
 （`alias` job 会把未重建镜像的 `:latest` digest 补成同一个 sha tag，一次成功运行即可覆盖三个镜像）。
 浅克隆拿不到历史时先 `git fetch --unshallow`；手动 `Run workflow` 会以当次 HEAD 产出 tag，
 只有这种情况 HEAD 的 sha 才成立。
+
+代入 `REGISTRY=ghcr.io/hulk-zhao/factroyai`、`IMAGE_TAG=sha-df57858`，compose 实际拉取：
+
+```text
+ghcr.io/hulk-zhao/factroyai-mfg-api:sha-df57858
+ghcr.io/hulk-zhao/factroyai-aps-backend:sha-df57858
+ghcr.io/hulk-zhao/factroyai-hogo-qa:sha-df57858
+```
+
+服务名用 `-` 接在前缀后（CI 的推送形态），不是 `/mfg-api`。GHCR 允许嵌套仓库路径，
+`factroyai/mfg-api` 与 `factroyai-mfg-api` 是两个不同镜像，混用会永远拉不到刚推的版本。
 
 **逐个确认三个镜像的 tag 真实存在**（缺一个，`up` 会在停机后才失败）：
 
@@ -978,9 +993,11 @@ docker compose up -d --no-build
 这是 Docker 客户端在**鉴权之前**做的格式校验，与登录、token、包可见性无关。
 `docker login -u` 的用户名可以大写，只有镜像路径必须小写；修正命令见 4.3。
 
-**Q：`docker compose pull` 报 `unauthorized` / `denied`？**
+**Q：`docker compose pull` 报 `unauthorized` / `denied` / 401？**
 私有包需要先 `docker login ghcr.io`，token 勾 `read:packages`；或把包改为 Public。
 确认 `REGISTRY` 全小写，且与 CI 推送的前缀完全一致。
+**不要用 401 判断镜像不存在**：GHCR 对未认证请求一律 401；登录后 `docker manifest inspect`
+返回 `not found` / `manifest unknown` 才是真的不存在。
 
 **Q：`docker manifest inspect` 三个镜像全 MISSING，是不是镜像没发布？**
 先看 gate3 的 tag 来源自检（4.4 的 3b）。如果 tag 指向的提交只改了 `deploy/` 或 `docs/`，

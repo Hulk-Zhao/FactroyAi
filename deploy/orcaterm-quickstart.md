@@ -146,6 +146,18 @@ echo "$REGISTRY_LOWER"
 > `docker login -u "$GHCR_USERNAME"` 里的 GitHub 用户名**可以大写**（那是账号名），
 > 只有 `ghcr.io/...` 这一段镜像路径必须小写，别把两者混在一起。
 
+代入 `REGISTRY=ghcr.io/hulk-zhao/factroyai`、`IMAGE_TAG=sha-df57858`，compose 实际拉取的是：
+
+```text
+ghcr.io/hulk-zhao/factroyai-mfg-api:sha-df57858
+ghcr.io/hulk-zhao/factroyai-aps-backend:sha-df57858
+ghcr.io/hulk-zhao/factroyai-hogo-qa:sha-df57858
+```
+
+服务名是用 `-` 直接接在前缀后的（与 CI 的 `docker push` 逐字一致），**不是** `/mfg-api`。
+GHCR 允许嵌套仓库路径（`a/b/c`），所以 `factroyai/mfg-api` 与 `factroyai-mfg-api`
+是两个完全不同的镜像，混用会永远拉不到刚推的镜像。
+
 **`IMAGE_TAG` 怎么取：不能用 `git rev-parse --short=7 HEAD`。**
 workflow 有 `paths` 过滤，只有改动 `projects/**` 或 `.github/workflows/build-images.yml`
 的提交才会构建镜像；只改文档/deploy 的提交（例如 `3c0641a`）不会产出任何 tag。
@@ -194,6 +206,11 @@ done
 
 两行 digest 相同：本次可以临时用 `:latest` 冒烟；不同：`:latest` 指向别的构建，
 **生产仍用固定 `sha-xxxxxxx`**，便于整体回滚和定位提交。
+
+> **401 不代表镜像不存在**：GHCR 对未认证请求一律返回 `401 unauthorized`，
+> 私有包匿名拉取也是 401，无法区分「不存在」和「没权限」。
+> 判断存在性必须**先登录**再 `docker manifest inspect`；
+> 返回 `not found` / `manifest unknown` 才是真的不存在。
 
 ### B. 服务器本地 build（仅兜底）
 
@@ -616,7 +633,7 @@ curl -sI -H 'Host: hulkai.cn' https://hulkai.cn.cdn.dnsv1.com/
 | `aps-backend` 报 `database "aps" does not exist` | 复用旧卷但 `APS_DB_NAME` 不一致 | 同上，对齐 `POSTGRES_DB` |
 | 容器反复重启，日志提示缺变量 | `.env` 缺键或仍是空值 | 用第 4 节的 grep 检查；`docker compose config --quiet` |
 | `invalid reference format: repository name (...) must be lowercase` | `.env` 的 `REGISTRY` 带了大写 owner（如 `Hulk-Zhao`）；Docker 在**鉴权前**就拒绝，与权限无关 | 把 `REGISTRY` 全转小写；`docker login -u` 的用户名可保留大写 |
-| `pull access denied` / `unauthorized` | 未登录 GHCR，或 token 无 `read:packages` | `docker login ghcr.io`；私有包必须登录 |
+| `pull access denied` / `unauthorized` / 401 | 未登录 GHCR，或 token 无 `read:packages`；**401 不能用来判断镜像是否存在**（匿名请求一律 401） | 先 `docker login ghcr.io`，再 `docker manifest inspect`；`not found` / `manifest unknown` 才是真不存在 |
 | 三个镜像 `manifest inspect` 全 MISSING | `IMAGE_TAG` 用了 HEAD 的 sha，而该提交只改文档、没触发构建 | 按第 3 节反查「最近一次触发构建的提交」重设 tag；不是镜像没发布 |
 | gate3 提示「tag 来源不覆盖 paths」 | 同上，tag 指向的提交不在 `projects/**` / workflow 范围 | 换 tag，不要改 Dockerfile 或重发镜像 |
 | `api.hulkai.cn` 打不开 / 解析到旧 IP | DNS 未生效或仍指向香港 | `dig +short api.hulkai.cn`；用 `--resolve` 先确认服务正常，再等 TTL |
