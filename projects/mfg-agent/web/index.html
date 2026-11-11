@@ -110,6 +110,8 @@
   <script defer src="./scenes/s05-trace.js"></script>
   <!-- T08：S6 采购执行场景屏（自注册到 SceneRegistry，不改 app.js） -->
   <script defer src="./scenes/s06-procurement.js"></script>
+  <!-- 部署期 API 基址（COS/CDN 静态托管时由发布脚本改写；本地留空走同源） -->
+  <script defer src="config.js?v=1"></script>
   <script defer src="app.js?v=perf5"></script>
   <script defer src="screens.js?v=qb3"></script>
   <!-- 报告中心：覆盖 screens.js 的静态版 render_reports（新增文件，不改既有函数体） -->

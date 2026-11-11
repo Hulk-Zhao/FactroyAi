@@ -1,0 +1,20 @@
+# =============================================================================
+# 证书就绪前的 HTTP-only 配置。
+# 用法：NGINX_CONF=api.http docker compose -f deploy/gz-api/docker-compose.yml up -d nginx
+# 作用：先用 80 端口验证 DNS、安全组与后端链路，再放证书切正式配置。
+# =============================================================================
+server {
+    listen 80;
+    server_name ${API_DOMAIN};
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location / {
+        return 200 "api gateway up (http-only)\n";
+        add_header Content-Type text/plain;
+    }
+}

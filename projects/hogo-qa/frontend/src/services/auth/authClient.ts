@@ -14,12 +14,17 @@
 export const AUTH_SESSION_KEY = 'hogo-auth-session';
 
 /**
- * 认证接口前缀：跟随构建基路径。
+ * 认证接口前缀。
  *
- * 独立部署时为 `/api/`；挂在子路径（`/demo/hogo-qa/`）时为
- * `/demo/hogo-qa/api/`——不能写死 `/api/`，否则会命中同域下的其它后端。
+ * - 默认跟随构建基路径：独立部署为 `/api/`；挂在子路径（`/demo/hogo-qa/`）时为
+ *   `/demo/hogo-qa/api/`——不能写死 `/api/`，否则会命中同域下的其它后端。
+ * - 静态站托管在 COS/CDN、后端在 api 子域时，用 `VITE_API_BASE` 指向
+ *   `https://api.hulkai.cn/hogo/api/`（构建时注入，未配置则保持原行为）。
  */
-const API_BASE = `${import.meta.env.BASE_URL}api/`;
+const CONFIGURED_API_BASE = (import.meta.env.VITE_API_BASE || '').trim();
+const API_BASE = CONFIGURED_API_BASE
+  ? CONFIGURED_API_BASE.replace(/\/?$/, '/')
+  : `${import.meta.env.BASE_URL}api/`;
 
 /** 已保存会话（与后端 login 响应对齐）。 */
 export interface AuthSession {

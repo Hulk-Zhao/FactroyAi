@@ -1,4 +1,8 @@
-# 香港：静态站 + 反向代理
+# 香港：静态站 + 反向代理（已退役，仅作回滚参考）
+
+> **2026-11 起不再使用。** 现行部署为「COS + CDN 静态站 + 广州单机 API」，
+> 见 [deploy/README.md](../README.md)。本目录只在需要整体回退到香港旧架构时使用；
+> 回滚前先确认旧证书覆盖 `hulkai.cn` / `www.hulkai.cn`。
 
 纯静态站 + Nginx，外加 `hogo-qa`（Node 容器）与 `smart-aps-frontend`（Vue 产物）两个本机服务。
 站点根目录挂载仓库的 `site/public`，各项目前端挂载 `projects/`，`/api/*` 反代到广州后端，

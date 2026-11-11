@@ -1,0 +1,121 @@
+# =============================================================================
+# hulkai.cn / www.hulkai.cn 静态源站（灾备）
+#
+# 默认关闭；仅在腾讯云 CDN 临时从「COS 源」改回「自有源」时，用
+# SERVE_STATIC_ORIGIN=1 启用，由 compose 启动脚本渲染到 /etc/nginx/conf.d/site.conf。
+# 对应 CDN 配置：
+#   源站类型   自有源
+#   源站地址   129.204.108.45（本机）
+#   回源协议   HTTPS
+#   回源 HOST  hulkai.cn
+#
+# 目录与证书（宿主机 → 容器，均不入库）：
+#   ${SITE_ROOT}                 → /srv/site        静态文件根
+#   certs/${SITE_DOMAIN}.pem|key → /etc/nginx/certs 证书（泛域名需含 www SAN）
+#
+# 注意：静态流量走这台机器的 5Mbps 出口，只适用于过渡期；流量压力上来后
+# 把静态切到 COS 源（见 deploy/README.md 第 7 节）。
+# =============================================================================
+
+# 按文件类型分层缓存。CDN 侧缓存规则应与此一致或更短，避免源站比 CDN 更激进。
+# nginx map 匹配顺序：精确键 → 正则（按书写顺序）→ default。
+map $uri $hulkai_cache_control {
+    default "public, max-age=3600";
+
+    # 入口与配置：必须实时，否则发版后用户看到旧页面 / 旧 API 基址
+    ~*\.html$                         "no-cache, must-revalidate";
+    /demo/mfg/config.js               "no-cache, must-revalidate";
+
+    # Vite 产物带内容 hash，可以永久缓存
+    ~*/assets/                        "public, max-age=31536000, immutable";
+
+    # 其余静态资源：mfg 靠 ?v= 破缓存，给 30 天
+    ~*\.(js|css|png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|map)$ "public, max-age=2592000";
+}
+
+server {
+    listen 80;
+    server_name ${SITE_DOMAIN} www.${SITE_DOMAIN};
+
+    # 健康检查（安全组/CDN 回源探活）
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # 证书校验文件走 80，不跳转
+    location ^~ /.well-known/acme-challenge/ {
+        root /srv/site;
+        try_files $uri =404;
+    }
+
+    # 其余一律 HTTPS。因此 CDN 的回源协议必须选 HTTPS；
+    # 若要改成 HTTP 回源，需要把这里改成直接返回静态文件。
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${SITE_DOMAIN} www.${SITE_DOMAIN};
+
+    # 证书必须覆盖 hulkai.cn 与 www.hulkai.cn（一张 *.hulkai.cn 泛域名证书即可）。
+    # 若 CDN 回源 HOST 是 hulkai.cn 而证书只签了 www，握手失败 → CDN 侧 526。
+    ssl_certificate     /etc/nginx/certs/${SITE_DOMAIN}.pem;
+    ssl_certificate_key /etc/nginx/certs/${SITE_DOMAIN}.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    server_tokens off;
+    root /srv/site;
+    index index.html;
+
+    # 从 X-Forwarded-For 还原真实客户端 IP（受信网段见 realip.conf）
+    include /etc/nginx/realip.conf;
+
+    add_header Cache-Control $hulkai_cache_control always;
+    add_header X-Content-Type-Options nosniff always;
+
+    # 源站压缩：只开 gzip。brotli 需要 ngx_brotli 模块，官方 nginx 镜像不含，
+    # 为避免自建镜像，brotli 统一在 CDN 侧开启（CDN 智能压缩）。
+    gzip on;
+    gzip_comp_level 5;
+    gzip_min_length 1024;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_types text/plain text/css text/xml application/javascript application/json
+               application/xml image/svg+xml application/manifest+json
+               font/ttf font/otf;
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # ---------- 旧同源接口兜底 ----------
+    # 历史页面若仍按 /api/... 请求，308 保留方法与请求体，转到 api 子域。
+    # 新构建的前端一律直接请求 https://api.hulkai.cn，不经过这里。
+    location ^~ /api/      { return 308 https://${API_DOMAIN}$request_uri; }
+    location ^~ /hogo/api/ { return 308 https://${API_DOMAIN}$request_uri; }
+    location ^~ /aps/      { return 308 https://${API_DOMAIN}$request_uri; }
+
+    # ---------- SPA history 路由回退 ----------
+    # 只回退到各自入口，不能统一落到站点根 index.html。
+    location ^~ /demo/hogo-qa/ {
+        try_files $uri $uri/ /demo/hogo-qa/index.html;
+    }
+
+    location ^~ /demo/mfg-agent-platform/ {
+        try_files $uri $uri/ /demo/mfg-agent-platform/index.html;
+    }
+
+    # ---------- 站点根与 mfg（hash 路由，无需回退）----------
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

@@ -866,6 +866,21 @@
           return null;
         };
 
+        // ⓪ 显式配置优先：静态站托管在 COS/CDN 时页面与 API 不同源，
+        //    config.js 的 window.MFG_API_BASE 是唯一后端入口；
+        //    配了就不再做同源/本机候选竞速，避免把 COS 域名误判成后端。
+        const configuredBase = (typeof window !== "undefined"
+          && typeof window.MFG_API_BASE === "string")
+          ? window.MFG_API_BASE.trim().replace(/\/+$/, "")
+          : "";
+        if (configuredBase) {
+          const hit = await probeOne(configuredBase);
+          state.backend = hit
+            ? { online: true, base: configuredBase, checking: false, health: hit.health || null }
+            : { online: false, base: "", checking: false, health: null };
+          return !!hit;
+        }
+
         // ① 同源优先：http(s) 托管时先单独打同源（不打其它候选，避免竞速误选旧实例）
         const sameOrigin = /^https?:$/.test(location.protocol) ? location.origin : "";
 

@@ -1,0 +1,106 @@
+# =============================================================================
+# 构建三个后端镜像并推送到 GHCR。
+#
+# 镜像命名（repo 路径全部小写）：
+#   ghcr.io/<owner>/<repo>-mfg-api:sha-<7>     + :latest
+#   ghcr.io/<owner>/<repo>-aps-backend:sha-<7> + :latest
+#   ghcr.io/<owner>/<repo>-hogo-qa:sha-<7>     + :latest
+#
+# 服务器只做 login / pull / up，不在 4C4G 机器上编译。
+#
+# 触发：push 到 main，或在 Actions 页面手动 Run workflow。
+# 所需凭据：GITHUB_TOKEN 自动提供（permissions.packages: write），无需额外 secret。
+# =============================================================================
+name: build-images
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image prefix and tag
+        id: meta
+        run: |
+          # GHCR 要求仓库路径小写；GITHUB_REPOSITORY 可能是 Owner/Repo
+          prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tag="sha-$(git rev-parse --short=7 HEAD)"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "镜像前缀：$prefix"
+          echo "本次 tag：$tag"
+
+      - name: Login GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push mfg-api
+        env:
+          PREFIX: ${{ steps.meta.outputs.prefix }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          docker build \
+            --build-arg PIP_INDEX_URL=${{ vars.PIP_INDEX_URL || 'https://mirrors.cloud.tencent.com/pypi/simple' }} \
+            -t "$PREFIX-mfg-api:$TAG" \
+            -t "$PREFIX-mfg-api:latest" \
+            projects/mfg-agent/api
+          docker push --all-tags "$PREFIX-mfg-api"
+
+      - name: Build and push aps-backend
+        env:
+          PREFIX: ${{ steps.meta.outputs.prefix }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          docker build \
+            -f projects/smart-aps-agent/aps-admin/Dockerfile \
+            --build-arg MAVEN_MIRROR_URL=${{ vars.APS_MAVEN_MIRROR_URL || 'https://maven.aliyun.com/repository/public' }} \
+            -t "$PREFIX-aps-backend:$TAG" \
+            -t "$PREFIX-aps-backend:latest" \
+            projects/smart-aps-agent
+          docker push --all-tags "$PREFIX-aps-backend"
+
+      - name: Build and push hogo-qa
+        env:
+          PREFIX: ${{ steps.meta.outputs.prefix }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          docker build \
+            --build-arg HOGO_BASE=/demo/hogo-qa/ \
+            -t "$PREFIX-hogo-qa:$TAG" \
+            -t "$PREFIX-hogo-qa:latest" \
+            projects/hogo-qa
+          docker push --all-tags "$PREFIX-hogo-qa"
+
+      - name: Summary
+        run: |
+          {
+            echo "### 本次镜像"
+            echo ""
+            echo '```'
+            echo "${{ steps.meta.outputs.prefix }}-mfg-api:${{ steps.meta.outputs.tag }}"
+            echo "${{ steps.meta.outputs.prefix }}-aps-backend:${{ steps.meta.outputs.tag }}"
+            echo "${{ steps.meta.outputs.prefix }}-hogo-qa:${{ steps.meta.outputs.tag }}"
+            echo '```'
+            echo ""
+            echo "服务器 .env 填："
+            echo ""
+            echo '```'
+            echo "REGISTRY=${{ steps.meta.outputs.prefix }}"
+            echo "IMAGE_TAG=${{ steps.meta.outputs.tag }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

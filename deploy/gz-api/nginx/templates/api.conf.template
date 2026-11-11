@@ -1,0 +1,162 @@
+# =============================================================================
+# api.hulkai.cn 正式配置（443）。由 compose 启动时 envsubst 渲染到 conf.d/default.conf。
+#
+# 路由：
+#   /api/*      → app:8004         mfg-agent FastAPI（含 SSE /api/v2/events）
+#   /hogo/api/* → hogo-qa:8788     SPC 演示门禁与样例数据
+#   /aps/*      → aps-backend:8080 智能 APS（含 /aps/ws/* WebSocket）
+#   /healthz    → 200              容器健康检查
+#   其它        → 302 站点首页
+#
+# 跨域：静态站（COS/CDN）与 API 不同源，浏览器会带 Origin。
+# 这里统一注入 CORS 并直接应答 OPTIONS，后端代码不需要改。
+# =============================================================================
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# 只回显白名单 Origin；未命中时不发 Access-Control-Allow-Origin。
+# 不使用 Cookie，因此不需要 Access-Control-Allow-Credentials。
+map $http_origin $cors_origin {
+    default "";
+    "${SITE_ORIGIN_PRIMARY}" $http_origin;
+    "${SITE_ORIGIN_WWW}"     $http_origin;
+}
+
+server {
+    listen 80;
+    server_name ${API_DOMAIN};
+
+    # 容器健康检查与证书/网关探活
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${API_DOMAIN};
+
+    # 证书文件由 deploy/gz-api/certs 挂入（不入库）：
+    #   certs/${API_DOMAIN}.pem  完整证书链
+    #   certs/${API_DOMAIN}.key  私钥
+    ssl_certificate     /etc/nginx/certs/${API_DOMAIN}.pem;
+    ssl_certificate_key /etc/nginx/certs/${API_DOMAIN}.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    server_tokens off;
+    client_max_body_size 20m;
+
+    # 上游（mfg FastAPI）自己也带 ACAO: *；若不在网关剥掉，会与本文件的
+    # add_header 叠加成两个 Access-Control-Allow-Origin，浏览器直接判 CORS 失败。
+    proxy_hide_header Access-Control-Allow-Origin;
+    proxy_hide_header Access-Control-Allow-Methods;
+    proxy_hide_header Access-Control-Allow-Headers;
+    proxy_hide_header Access-Control-Allow-Credentials;
+    proxy_hide_header Access-Control-Max-Age;
+    proxy_hide_header Access-Control-Expose-Headers;
+
+    # ---------- CORS：对所有响应生效 ----------
+    add_header Access-Control-Allow-Origin  $cors_origin always;
+    add_header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS" always;
+    add_header Access-Control-Allow-Headers "Authorization, Content-Type, X-API-Key, X-Requested-With, Accept, Origin, X-Trace-Id, X-Import-Token" always;
+    add_header Access-Control-Max-Age 86400 always;
+    # 跨域下浏览器默认读不到这些响应头；导入模板下载依赖 X-Template-Filename
+    add_header Access-Control-Expose-Headers "Content-Disposition, Content-Length, Content-Type, X-Template-Filename, X-Trace-Id" always;
+    add_header Vary Origin always;
+    add_header X-Content-Type-Options nosniff always;
+
+    # 预检直接由网关应答，不进入 Java/Node 后端（避免被鉴权拦截成 401）
+    if ($request_method = OPTIONS) {
+        return 204;
+    }
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # ---------- mfg-agent FastAPI ----------
+    location ^~ /api/ {
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set $mfg_backend app:8004;
+        proxy_pass http://$mfg_backend;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $proxy_host;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection        "";
+
+        # SSE：事件逐条下发，不能缓冲
+        proxy_buffering off;
+        proxy_cache off;
+        chunked_transfer_encoding on;
+
+        proxy_connect_timeout 10s;
+        proxy_send_timeout    300s;
+        proxy_read_timeout    300s;
+    }
+
+    # ---------- Hogo-QA-tool 后端 ----------
+    # 浏览器请求 /hogo/api/auth/login → 去掉 /hogo 前缀 → hogo-qa:8788/api/auth/login
+    location ^~ /hogo/api/ {
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set $hogo_backend hogo-qa:8788;
+        rewrite ^/hogo/(.*)$ /$1 break;
+        proxy_pass http://$hogo_backend;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $proxy_host;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection        "";
+
+        proxy_read_timeout 60s;
+    }
+
+    # ---------- 智能 APS 排产平台后端 ----------
+    # 浏览器请求 /aps/api/v1/... → aps-backend:8080/api/v1/...
+    # 求解进度 WebSocket：/aps/ws/solve-tasks/{id} → /ws/solve-tasks/{id}
+    location ^~ /aps/ {
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set $aps_backend aps-backend:8080;
+        rewrite ^/aps/(.*)$ /$1 break;
+        proxy_pass http://$aps_backend;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $proxy_host;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $connection_upgrade;
+
+        # 排产求解可能长耗时，WebSocket 进度推送需保持连接
+        proxy_connect_timeout 10s;
+        proxy_send_timeout    3600s;
+        proxy_read_timeout    3600s;
+    }
+
+    # API 域名不承载页面：根路径与未知路径都跳回站点
+    location / {
+        return 302 https://${SITE_DOMAIN}$request_uri;
+    }
+}

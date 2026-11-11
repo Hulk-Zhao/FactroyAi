@@ -39,6 +39,22 @@ projects/*/backend/data/runtime/
 # IDE 分享产物（Trae 生成的 html 打包，不入库）
 .trae-html-share-packages/
 
+# 广州单机部署：TLS 证书私钥只放服务器本地，仓库仅保留 .env.example
+deploy/gz-api/certs/
+
+# 可选静态源站目录（SERVE_STATIC_ORIGIN=1 时由发布产物同步进来）
+deploy/gz-api/site/
+
+# COS 发布临时产物
+deploy/cos/dist/
+
+# 证书与私钥：全局兜底，避免放到非 certs/ 目录时被误提交
+*.pem
+*.key
+
+# demo 验证截图（本地留档，不入库）
+.demo-verify/
+
 # 编辑器 / 系统
 .idea/
 .vscode/

@@ -1,5 +1,17 @@
 name: hulkai-gz-api
 
+# =============================================================================
+# 广州单机（4C4G）全栈：后端 API + WebSocket + 边缘 Nginx
+#
+# 对外只暴露 80/443，由本目录的 nginx 容器按 api.hulkai.cn 分发：
+#   /api/*      → app:8004        （mfg-agent FastAPI + SSE）
+#   /hogo/api/* → hogo-qa:8788    （SPC 演示门禁 / 样例数据）
+#   /aps/*      → aps-backend:8080（智能 APS，含 /aps/ws/* STOMP）
+#
+# 前端静态资源不在这台机器上：由 deploy/cos 上传到 COS + CDN。
+# 所有后端端口只绑定 127.0.0.1，供排障用；公网安全组只需放行 22/80/443。
+# =============================================================================
+
 services:
   redis:
     image: redis:7-alpine
@@ -13,6 +25,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+
   app:
     build:
       # 广州只跑 FastAPI：指向项目源码目录
@@ -20,9 +33,9 @@ services:
       args:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.cloud.tencent.com/pypi/simple}
         PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.12-slim-bookworm}
-    image: ${IMAGE_TAG:-mfg-agent-backend:latest}
+    image: ${REGISTRY:?请先在 .env 配置 REGISTRY（如 ghcr.io/your-name/your-repo）}/mfg-api:${IMAGE_TAG:-latest}
     container_name: mfg_app
-    # 密钥从部署目录本地的 .env 读取（清单：projects/mfg-agent/api/.env.example -> 本目录 .env）
+    # 密钥从部署目录本地的 .env 读取（模板见 deploy/gz-api/.env.example）
     env_file: .env
     depends_on:
       redis:
@@ -31,8 +44,9 @@ services:
       TZ: Asia/Shanghai
       LANG: C.UTF-8
       PYTHONUNBUFFERED: "1"
+    # 仅本机回环，公网不会命中；Nginx 走 compose 内网 app:8004
     ports:
-      - "8004:8004"
+      - "127.0.0.1:${MFG_HOST_PORT:-8004}:8004"
     volumes:
       - mfg_data:/app/data
     mem_limit: 2800m
@@ -54,7 +68,7 @@ services:
 
   # ---------------------------------------------------------------------------
   # smart-aps-agent（智能 APS 排产平台）后端：PostgreSQL 15 + Spring Boot 3
-  # 前端静态产物在香港（smart-aps-frontend），本机只跑 API，由香港反代 8085。
+  # 前端静态产物在 COS/CDN，本机只跑 API，由 Nginx 以 /aps/* 暴露。
   # 资源占用：APS 后端 700m + PostgreSQL 256m；与上面的 mfg-agent 共用 4C4G 时请复核内存。
   # ---------------------------------------------------------------------------
   aps-postgres:
@@ -94,7 +108,7 @@ services:
       args:
         # 国内构建直连 Maven Central 易被 TLS 中断；可用 .env 覆盖为其它镜像
         MAVEN_MIRROR_URL: ${APS_MAVEN_MIRROR_URL:-https://maven.aliyun.com/repository/public}
-    image: ${APS_IMAGE_TAG:-hulkai-aps-backend:latest}
+    image: ${REGISTRY}/aps-backend:${IMAGE_TAG:-latest}
     container_name: hulkai_aps_backend
     depends_on:
       aps-postgres:
@@ -119,13 +133,13 @@ services:
       APS_SECURITY_JWT_SECRET: ${APS_SECURITY_JWT_SECRET:-aps-demo-jwt-secret-change-me-0123456789abcdef}
       APS_SECURITY_JWT_TTL_SECONDS: ${APS_SECURITY_JWT_TTL_SECONDS:-28800}
       APS_ADMIN_INIT_PASSWORD: ${APS_ADMIN_INIT_PASSWORD:-ApsDemo2026}
-      # STOMP Origin 白名单：必须包含香港站点域名，否则求解进度 WebSocket 会被拒。
-      # 以 hulkai.xyz 为准，同时保留 hulkai.cn 兼容；换域名只改 deploy/gz-api/.env 的同名变量。
-      APS_SECURITY_WS_ALLOWED_ORIGINS: ${APS_SECURITY_WS_ALLOWED_ORIGINS:-https://hulkai.xyz,https://hulkai.cn,https://www.hulkai.cn,https://www.hulkai.xyz}
+      # STOMP Origin 白名单：静态站改为 COS/CDN 后，浏览器 Origin 仍是站点域名。
+      # 以 hulkai.cn 为准；www 也要写入，否则 www 入口的求解进度 WebSocket 会被拒。
+      APS_SECURITY_WS_ALLOWED_ORIGINS: ${APS_SECURITY_WS_ALLOWED_ORIGINS:-https://hulkai.cn,https://www.hulkai.cn}
       APS_BUSINESS_TIME_ZONE: Asia/Shanghai
     ports:
-      # 只给香港反代；云安全组需限制来源 43.132.214.124/32
-      - "${APS_BACKEND_PORT:-8085}:8080"
+      # 仅本机回环；公网由 Nginx 以 /aps/* 暴露
+      - "127.0.0.1:${APS_BACKEND_PORT:-8085}:8080"
     mem_limit: 700m
     memswap_limit: 900m
     restart: unless-stopped
@@ -143,8 +157,121 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  # ---------------------------------------------------------------------------
+  # Hogo-QA-tool：SPC 质量分析工具的演示门禁 / 样例数据后端。
+  # 前端静态产物已上传 COS，这里只跑 Node 服务；Nginx 以 /hogo/api/* 暴露。
+  # ---------------------------------------------------------------------------
+  hogo-qa:
+    build:
+      context: ../../projects/hogo-qa
+      args:
+        # 容器内构建的静态产物不再对外提供，基路径保持默认即可
+        HOGO_BASE: /demo/hogo-qa/
+    image: ${REGISTRY}/hogo-qa:${IMAGE_TAG:-latest}
+    container_name: hulkai_hogo_qa
+    environment:
+      TZ: Asia/Shanghai
+      # 演示口令（防刷门禁）；公网部署必须在 .env 覆盖
+      AUTH_PASSWORD: ${HOGO_AUTH_PASSWORD:-change-me}
+      # 留空则首次启动自动生成并持久化到卷 hulkai_hogo_runtime
+      AUTH_SECRET: ${HOGO_AUTH_SECRET:-}
+    volumes:
+      - hogo_runtime:/app/backend/data/runtime
+    mem_limit: 160m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8788/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # 边缘 Nginx：唯一对外入口（80/443），终止 TLS 并统一处理 CORS。
+  # 默认不放静态文件：站点内容在 COS + CDN。
+  # 仅灾备时（SERVE_STATIC_ORIGIN=1）额外渲染 site.conf 提供静态源站。
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: ${NGINX_IMAGE:-nginx:1.27-alpine}
+    container_name: hulkai_gz_nginx
+    depends_on:
+      app:
+        condition: service_started
+      aps-backend:
+        condition: service_started
+      hogo-qa:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      TZ: Asia/Shanghai
+      # 对外 API 域名（写入 server_name，同时用于证书文件名）
+      API_DOMAIN: ${API_DOMAIN:-api.hulkai.cn}
+      # 站点主域名：仅用于 api 域名根路径跳转与 CORS 白名单
+      SITE_DOMAIN: ${SITE_DOMAIN:-hulkai.cn}
+      SITE_ORIGIN_PRIMARY: ${SITE_ORIGIN_PRIMARY:-https://hulkai.cn}
+      SITE_ORIGIN_WWW: ${SITE_ORIGIN_WWW:-https://www.hulkai.cn}
+      # api（含 443）| api.http（证书就绪前的 HTTP-only 冒烟）
+      NGINX_CONF: ${NGINX_CONF:-api}
+      # 1=灾备：本机作为 hulkai.cn / www 的静态源站（仅 CDN 临时改回自有源时开启）
+      SERVE_STATIC_ORIGIN: ${SERVE_STATIC_ORIGIN:-0}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        envsubst '$${API_DOMAIN} $${SITE_DOMAIN} $${SITE_ORIGIN_PRIMARY} $${SITE_ORIGIN_WWW}' \
+          < "/etc/nginx/templates/$${NGINX_CONF}.conf.template" \
+          > /etc/nginx/conf.d/default.conf
+
+        # 静态源站是灾备方案（CDN 临时改回「自有源」时才用），默认关闭
+        rm -f /etc/nginx/conf.d/site.conf
+        if [ "$${SERVE_STATIC_ORIGIN}" = "1" ]; then
+          if [ "$${NGINX_CONF}" = "api.http" ]; then
+            echo "SERVE_STATIC_ORIGIN=1 需要 443 证书，不能与 NGINX_CONF=api.http 同时使用" >&2
+            exit 1
+          fi
+          envsubst '$${API_DOMAIN} $${SITE_DOMAIN}' \
+            < /etc/nginx/templates/site-origin.conf.template \
+            > /etc/nginx/conf.d/site.conf
+        fi
+
+        # 配置或证书缺失时快速失败，日志里能直接看到原因
+        nginx -t
+        exec nginx -g 'daemon off;'
+    volumes:
+      - ./nginx/templates:/etc/nginx/templates:ro
+      # 证书目录（不入库）：api.hulkai.cn.pem|key、hulkai.cn.pem|key
+      - ./certs:/etc/nginx/certs:ro
+      # CDN 回源真实 IP 段；仓库只放空名单，服务器按控制台填
+      - ./nginx/realip.conf:/etc/nginx/realip.conf:ro
+      # 可选静态源站根目录；SERVE_STATIC_ORIGIN=0 时不读取
+      - ${SITE_ROOT:-/opt/hulkai/site}:/srv/site:ro
+    restart: unless-stopped
+    stop_grace_period: 10s
+    healthcheck:
+      # HTTP-only 模式也能通过；正式模式下 80 端口同样保留 /healthz
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
 volumes:
   mfg_data:
     name: mfg_data
   aps_pgdata:
     name: hulkai_aps_pgdata
+  # Hogo-QA-tool 运行时密钥（容器重建后登录会话不失效）
+  hogo_runtime:
+    name: hulkai_hogo_runtime

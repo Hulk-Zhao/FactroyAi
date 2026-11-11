@@ -2,7 +2,7 @@
 
 > 本目录是 `hulkai` 单仓的 `projects/hogo-qa/` 子项目（历史由 git subtree 完整保留）。
 > 线上形态由仓库根目录的 [deploy/hk-web](../../deploy/hk-web/README.md) 部署到
-> `https://hulkai.xyz/demo/hogo-qa/`；下文命令均在**本目录内**执行。
+> `https://hulkai.cn/demo/hogo-qa/`；下文命令均在**本目录内**执行。
 
 [![CI](https://github.com/Hulk-Zhao/hulkai/actions/workflows/hogo-qa.yml/badge.svg)](https://github.com/Hulk-Zhao/hulkai/actions/workflows/hogo-qa.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -139,7 +139,7 @@ npm run smoke   # 后端 9 项冒烟（登录/限流/静态托管）
 ## 云端部署
 
 生产形态已并入 `hulkai` 单仓，由香港机器上的 `deploy/hk-web` 统一部署，
-入口是 **`https://hulkai.xyz/demo/hogo-qa/`**（Nginx 反代到本机 `hogo-qa` 容器 8788）。
+入口是 **`https://hulkai.cn/demo/hogo-qa/`**（Nginx 反代到本机 `hogo-qa` 容器 8788）。
 
 ```bash
 # 仓库根目录执行
