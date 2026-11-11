@@ -1,5 +1,5 @@
 /* =========================================================
-   hulkai.xyz · 个人主页
+   hulkai.cn · 个人主页
    深色首屏 + 浅色内容；零构建、无外部字体/CDN
    ========================================================= */
 
@@ -1074,6 +1074,25 @@ body.nav-open .nav-toggle span:nth-child(2) { top: 18px; transform: rotate(-45de
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   font-size: 11.5px;
   color: #65758f;
+}
+/* 备案信息：跟随页脚的低调小字，单独一行，移动端不挤压现有页脚布局 */
+.footer-icp {
+  margin-top: 14px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #65758f;
+}
+.footer-icp a {
+  color: inherit;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: color 0.2s ease;
+}
+.footer-icp a:hover,
+.footer-icp a:focus-visible {
+  color: #c9d4e6;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 /* ---------------- 滚动出现 ---------------- */
