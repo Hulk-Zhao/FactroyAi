@@ -81,8 +81,18 @@ jobs:
       - name: Compute image prefix and tag
         id: meta
         run: |
-          # GHCR 要求仓库路径小写；GITHUB_REPOSITORY 可能是 Owner/Repo
-          prefix="ghcr.io/${GITHUB_REPOSITORY,,}"
+          # GHCR 镜像路径必须全小写；GITHUB_REPOSITORY 保留大小写（如 Hulk-Zhao/FactroyAi），
+          # 直接拼进镜像名会让 docker push 在客户端就报
+          # invalid reference format: repository name (...) must be lowercase。
+          # 这里显式转换并断言，不依赖 GitHub 或 Docker 的自动规范化。
+          prefix="ghcr.io/$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          case "$prefix" in
+            *[A-Z]*)
+              echo "::error::镜像前缀仍含大写：$prefix"
+              exit 1
+              ;;
+          esac
+          # 注意：docker login -u 的用户名允许大写（账号名），只有镜像路径必须小写。
           tag="sha-$(git rev-parse --short=7 HEAD)"
           echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"

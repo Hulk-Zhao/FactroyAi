@@ -128,9 +128,23 @@ docker compose pull                  # 只拉取，不构建，不影响运行�
 `.env` 里必须与 CI Summary 一致：
 
 ```dotenv
-REGISTRY=ghcr.io/<owner>/<repo>      # 全小写
+REGISTRY=ghcr.io/<owner>/<repo>      # 必须全小写
 IMAGE_TAG=sha-1a2b3c4                # 触发构建的那次提交，不是 HEAD；不要用 latest
 ```
+
+**`REGISTRY` 必须全小写。** GitHub 上 owner 显示为 `Hulk-Zhao`，但镜像路径只能写
+`hulk-zhao`；写成大写时 `docker pull` 会在**鉴权之前**就报
+`invalid reference format: repository name (...) must be lowercase`，
+和登录、权限、包可见性都无关。CI Summary 里打印的 `REGISTRY` 已经是小写，
+手输时按下面强制转换：
+
+```bash
+REGISTRY_LOWER="ghcr.io/$(printf '%s' '<owner>/<repo>' | tr '[:upper:]' '[:lower:]')"
+echo "$REGISTRY_LOWER"
+```
+
+> `docker login -u "$GHCR_USERNAME"` 里的 GitHub 用户名**可以大写**（那是账号名），
+> 只有 `ghcr.io/...` 这一段镜像路径必须小写，别把两者混在一起。
 
 **`IMAGE_TAG` 怎么取：不能用 `git rev-parse --short=7 HEAD`。**
 workflow 有 `paths` 过滤，只有改动 `projects/**` 或 `.github/workflows/build-images.yml`
@@ -225,7 +239,7 @@ sed -i "s|^APS_SECURITY_JWT_SECRET=.*|APS_SECURITY_JWT_SECRET=$(openssl rand -he
 
 | 键 | 必填 | 缺失 / 保留占位符的现象 | 怎么生成 / 怎么填 |
 | --- | --- | --- | --- |
-| `REGISTRY` | 是 | compose 插值直接报 `请先在 .env 配置 REGISTRY`，**一个容器都起不来** | 填 CI Summary 的 `ghcr.io/<owner>/<repo>`（全小写） |
+| `REGISTRY` | 是 | 未替换：compose 插值报 `请先在 .env 配置 REGISTRY`，**一个容器都起不来**；含大写：`pull` 在鉴权前报 `invalid reference format ... must be lowercase` | 填 CI Summary 的 `ghcr.io/<owner>/<repo>`；owner 一律小写（`Hulk-Zhao` → `hulk-zhao`） |
 | `IMAGE_TAG` | 是 | 缺省会退成 `latest`（不知道跑哪次提交）；对应 tag 不存在时 `pull`/`up` 失败 | 填**触发构建的提交**的 `sha-xxxxxxx`（第 3 节反查），不要用 HEAD；回滚填上一个可用 sha |
 | `AUTH_SECRET` | 是 | mfg 每次重启后旧登录态全部失效，表现为"刚登录就 401" | `openssl rand -hex 32` |
 | `MFG_ADMIN_PASS` | 是 | 仍是 `change-me`：后台可用默认口令登录（容器照常启动，不会报错） | 自定强口令 |
@@ -340,6 +354,12 @@ test -f docker-compose.yml && echo 'gate1 repo ok' || echo 'gate1 FAIL: 仓库�
 test -f .env && echo 'gate2 env exists' || echo 'gate2 FAIL: 没有 .env'
 grep -nE '^(AUTH_SECRET|MFG_ADMIN_PASS|QW_KEY|DS_KEY|DASHSCOPE_API_KEY|APS_DB_PASSWORD|APS_SECURITY_JWT_SECRET|HOGO_AUTH_PASSWORD)=$' .env \
   && echo 'gate2 FAIL: 上面这些键还是空的'
+
+# 2b) REGISTRY 必须全小写：大写会在 pull 时被 Docker 在鉴权前拒绝
+REGISTRY=$(grep -E '^REGISTRY=' .env | cut -d= -f2)
+[ "$REGISTRY" = "$(printf '%s' "$REGISTRY" | tr '[:upper:]' '[:lower:]')" ] \
+  && echo 'gate2 REGISTRY 小写 ok' \
+  || echo 'gate2 FAIL: REGISTRY 含大写 → 先转小写，否则 pull 报 invalid reference format'
 
 # 3) 三个镜像 tag 都存在（本地 build 场景改为 docker images 确认）
 REGISTRY=$(grep -E '^REGISTRY=' .env | cut -d= -f2)
@@ -595,6 +615,7 @@ curl -sI -H 'Host: hulkai.cn' https://hulkai.cn.cdn.dnsv1.com/
 | `aps-backend` 反复重启，日志 `password authentication failed` | 复用旧卷但 `APS_DB_PASSWORD` 与卷初始化时不一致 | 用 4 节的 `docker inspect ...-pre-switch` 读出旧值并回填 |
 | `aps-backend` 报 `database "aps" does not exist` | 复用旧卷但 `APS_DB_NAME` 不一致 | 同上，对齐 `POSTGRES_DB` |
 | 容器反复重启，日志提示缺变量 | `.env` 缺键或仍是空值 | 用第 4 节的 grep 检查；`docker compose config --quiet` |
+| `invalid reference format: repository name (...) must be lowercase` | `.env` 的 `REGISTRY` 带了大写 owner（如 `Hulk-Zhao`）；Docker 在**鉴权前**就拒绝，与权限无关 | 把 `REGISTRY` 全转小写；`docker login -u` 的用户名可保留大写 |
 | `pull access denied` / `unauthorized` | 未登录 GHCR，或 token 无 `read:packages` | `docker login ghcr.io`；私有包必须登录 |
 | 三个镜像 `manifest inspect` 全 MISSING | `IMAGE_TAG` 用了 HEAD 的 sha，而该提交只改文档、没触发构建 | 按第 3 节反查「最近一次触发构建的提交」重设 tag；不是镜像没发布 |
 | gate3 提示「tag 来源不覆盖 paths」 | 同上，tag 指向的提交不在 `projects/**` / workflow 范围 | 换 tag，不要改 Dockerfile 或重发镜像 |

@@ -102,6 +102,10 @@ docker compose config --quiet && echo "compose 配置有效"
 | 智能 APS 后端 | `ghcr.io/acme/factroy-ai-aps-backend:sha-1a2b3c4` |
 | Hogo-QA 后端 | `ghcr.io/acme/factroy-ai-hogo-qa:sha-1a2b3c4` |
 
+- **镜像路径必须全小写**：GitHub owner 可能是 `Hulk-Zhao`，GHCR 路径只能写 `hulk-zhao`。
+  `prepare` job 用 `tr` 强制转换并断言（`pipeline` 里不再依赖 GitHub 自动规范化），
+  `.env` 的 `REGISTRY` 必须是同一个小写值，否则 `docker pull` 在鉴权前就报
+  `invalid reference format ... must be lowercase`。
 - `sha-<7 位>` 与**触发构建的提交**一一对应（不是仓库 HEAD），三个镜像共用同一个 tag，便于整体回滚。
   只改 `deploy/`、`docs/` 的提交不会触发构建，也不会产出 tag。
 - 同时推送 `:latest`，但**生产只用 sha tag**，避免“不知道跑的是哪次提交”。
@@ -204,7 +208,7 @@ vi .env
 
 | 分组 | 键 | 必填 | 缺失 / 保留占位符的现象 |
 | --- | --- | --- | --- |
-| 镜像 | `REGISTRY`、`IMAGE_TAG` | 是 | `REGISTRY` 未替换：compose 插值报错，**一个容器都起不来**；`IMAGE_TAG` 取错（例如用 HEAD 而非触发构建的提交）：`pull`/`up` 失败 |
+| 镜像 | `REGISTRY`、`IMAGE_TAG` | 是 | `REGISTRY` 未替换：compose 插值报错，**一个容器都起不来**；`REGISTRY` 含大写：`pull` 在鉴权前报 `invalid reference format ... must be lowercase`；`IMAGE_TAG` 取错（例如用 HEAD 而非触发构建的提交）：`pull`/`up` 失败 |
 | 拓扑 | `API_DOMAIN`、`SITE_DOMAIN`、`SITE_ORIGIN_PRIMARY`、`SITE_ORIGIN_WWW`、`NGINX_CONF` | 是（默认值可直接用） | 证书文件名对不上导致 nginx 起不来；跨域预检不带 `access-control-allow-origin` |
 | 静态源站（灾备） | `SERVE_STATIC_ORIGIN`、`SITE_ROOT` | 是（默认 `0`） | 设 `1` 但缺 `hulkai.cn` 证书 → nginx `Exited (1)`；`SITE_ROOT` 只在 `=1` 时生效 |
 | 端口 | `MFG_HOST_PORT`、`APS_BACKEND_PORT` | 是（默认即可） | 与旧容器/系统 nginx 冲突时报 `port is already allocated` |
@@ -252,6 +256,18 @@ cd /opt/hulkai/FactroyAi/deploy/gz-api
 docker compose config --quiet          # 只解析配置：仓库/.env/变量插值一次暴露
 docker compose pull                    # 只拉取，不构建，不影响运行中的旧栈
 ```
+
+如果 `pull` 报 `invalid reference format: repository name (...) must be lowercase`：
+`REGISTRY` 里带了大写 owner（GitHub 显示 `Hulk-Zhao`，路径必须 `hulk-zhao`）。
+Docker 在**鉴权之前**就拒绝，和登录、token、包可见性都无关。修正：
+
+```bash
+REGISTRY=$(grep -E '^REGISTRY=' .env | cut -d= -f2 | tr '[:upper:]' '[:lower:]')
+sed -i "s|^REGISTRY=.*|REGISTRY=$REGISTRY|" .env
+grep '^REGISTRY=' .env
+```
+
+> `docker login -u "$GHCR_USERNAME"` 的用户名**可以大写**（账号名），只有镜像路径必须小写。
 
 如果 `pull` 报 `unauthorized`：检查 token 是否过期、是否勾选 `read:packages`、
 包是否私有（GitHub → 个人/组织 → Packages → 该包 → Visibility）。
@@ -956,6 +972,11 @@ docker compose up -d --no-build
 ---
 
 ## 12. 常见问题
+
+**Q：`docker pull` 报 `invalid reference format: repository name (...) must be lowercase`？**
+`REGISTRY` 里带了大写 owner（GitHub 显示 `Hulk-Zhao`，镜像路径只能写 `hulk-zhao`）。
+这是 Docker 客户端在**鉴权之前**做的格式校验，与登录、token、包可见性无关。
+`docker login -u` 的用户名可以大写，只有镜像路径必须小写；修正命令见 4.3。
 
 **Q：`docker compose pull` 报 `unauthorized` / `denied`？**
 私有包需要先 `docker login ghcr.io`，token 勾 `read:packages`；或把包改为 Public。
