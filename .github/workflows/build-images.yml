@@ -1,10 +1,17 @@
 # =============================================================================
-# 构建三个后端镜像并推送到 GHCR。
+# 构建三个后端镜像，推送到 GHCR，并在配置了 TCR 凭据时同时推送腾讯云 TCR。
 #
 # 镜像命名（repo 路径全部小写）：
-#   ghcr.io/<owner>/<repo>-mfg-api:sha-<7>     + :latest
-#   ghcr.io/<owner>/<repo>-aps-backend:sha-<7> + :latest
-#   ghcr.io/<owner>/<repo>-hogo-qa:sha-<7>     + :latest
+#   GHCR：ghcr.io/<owner>/<repo>-mfg-api:sha-<7>     + :latest
+#         ghcr.io/<owner>/<repo>-aps-backend:sha-<7> + :latest
+#         ghcr.io/<owner>/<repo>-hogo-qa:sha-<7>     + :latest
+#   TCR ：ccr.ccs.tencentyun.com/hulkai/<repo>-mfg-api:sha-<7>     + :latest
+#         ccr.ccs.tencentyun.com/hulkai/<repo>-aps-backend:sha-<7> + :latest
+#         ccr.ccs.tencentyun.com/hulkai/<repo>-hogo-qa:sha-<7>     + :latest
+#
+# TCR 是可选通道（GHCR 在国内常拉不动）：
+#   在仓库 Secrets 配置 TCR_USERNAME / TCR_PASSWORD（腾讯云 TCR 个人版访问凭证）。
+#   两个 secret 都不存在时，所有 TCR 步骤自动跳过，只推 GHCR，workflow 不失败。
 #
 # 服务器只做 login / pull / up，不在 4C4G 机器上编译。
 #
@@ -37,7 +44,8 @@
 #   3) 新增一个 build job：复制现有 job，改 context / Dockerfile / 镜像名 / if
 #   4) alias 与 summary：镜像列表各加一项，否则未重建时不会补 tag、汇总也不显示
 #
-# 所需凭据：GITHUB_TOKEN 自动提供（permissions.packages: write），无需额外 secret。
+# 所需凭据：GITHUB_TOKEN 自动提供（permissions.packages: write）；
+#   TCR 可选，配了 TCR_USERNAME / TCR_PASSWORD 才会推。
 # =============================================================================
 name: build-images
 
@@ -67,6 +75,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       prefix: ${{ steps.meta.outputs.prefix }}
+      tcr_prefix: ${{ steps.meta.outputs.tcr_prefix }}
       tag: ${{ steps.meta.outputs.tag }}
       mfg: ${{ steps.changes.outputs.mfg }}
       aps: ${{ steps.changes.outputs.aps }}
@@ -93,10 +102,14 @@ jobs:
               ;;
           esac
           # 注意：docker login -u 的用户名允许大写（账号名），只有镜像路径必须小写。
+          # TCR 个人版：ccr.ccs.tencentyun.com / 命名空间 hulkai / 仓库 <repo>-<服务名>
+          tcr_prefix="ccr.ccs.tencentyun.com/hulkai/$(printf '%s' "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')"
           tag="sha-$(git rev-parse --short=7 HEAD)"
           echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          echo "tcr_prefix=$tcr_prefix" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "镜像前缀：$prefix"
+          echo "TCR 前缀：$tcr_prefix（未配 secret 时不推送）"
           echo "本次 tag：$tag"
 
       - name: Detect changed paths
@@ -161,6 +174,9 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.mfg == 'true'
     runs-on: ubuntu-latest
+    env:
+      TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+      TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -170,23 +186,44 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
+      - name: Login TCR
+        if: env.TCR_USERNAME != '' && env.TCR_PASSWORD != ''
+        run: |
+          echo "$TCR_PASSWORD" \
+            | docker login ccr.ccs.tencentyun.com -u "$TCR_USERNAME" --password-stdin
+
       - name: Build and push mfg-api
         env:
           PREFIX: ${{ needs.prepare.outputs.prefix }}
+          TCR_PREFIX: ${{ needs.prepare.outputs.tcr_prefix }}
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
+          set -euo pipefail
+          tcr_tags=()
+          if [ -n "${TCR_USERNAME:-}" ] && [ -n "${TCR_PASSWORD:-}" ]; then
+            tcr_tags=(-t "$TCR_PREFIX-mfg-api:$TAG" -t "$TCR_PREFIX-mfg-api:latest")
+          fi
           docker build \
             --build-arg PIP_INDEX_URL=${{ vars.PIP_INDEX_URL || 'https://mirrors.cloud.tencent.com/pypi/simple' }} \
             -t "$PREFIX-mfg-api:$TAG" \
             -t "$PREFIX-mfg-api:latest" \
+            "${tcr_tags[@]}" \
             projects/mfg-agent/api
           docker push --all-tags "$PREFIX-mfg-api"
+          if [ ${#tcr_tags[@]} -gt 0 ]; then
+            docker push --all-tags "$TCR_PREFIX-mfg-api"
+          else
+            echo "::notice title=TCR 跳过::未配置 TCR_USERNAME / TCR_PASSWORD，本次只推 GHCR"
+          fi
 
   aps:
     name: build aps-backend
     needs: prepare
     if: needs.prepare.outputs.aps == 'true'
     runs-on: ubuntu-latest
+    env:
+      TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+      TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -196,24 +233,45 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
+      - name: Login TCR
+        if: env.TCR_USERNAME != '' && env.TCR_PASSWORD != ''
+        run: |
+          echo "$TCR_PASSWORD" \
+            | docker login ccr.ccs.tencentyun.com -u "$TCR_USERNAME" --password-stdin
+
       - name: Build and push aps-backend
         env:
           PREFIX: ${{ needs.prepare.outputs.prefix }}
+          TCR_PREFIX: ${{ needs.prepare.outputs.tcr_prefix }}
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
+          set -euo pipefail
+          tcr_tags=()
+          if [ -n "${TCR_USERNAME:-}" ] && [ -n "${TCR_PASSWORD:-}" ]; then
+            tcr_tags=(-t "$TCR_PREFIX-aps-backend:$TAG" -t "$TCR_PREFIX-aps-backend:latest")
+          fi
           docker build \
             -f projects/smart-aps-agent/aps-admin/Dockerfile \
             --build-arg MAVEN_MIRROR_URL=${{ vars.APS_MAVEN_MIRROR_URL || 'https://maven.aliyun.com/repository/public' }} \
             -t "$PREFIX-aps-backend:$TAG" \
             -t "$PREFIX-aps-backend:latest" \
+            "${tcr_tags[@]}" \
             projects/smart-aps-agent
           docker push --all-tags "$PREFIX-aps-backend"
+          if [ ${#tcr_tags[@]} -gt 0 ]; then
+            docker push --all-tags "$TCR_PREFIX-aps-backend"
+          else
+            echo "::notice title=TCR 跳过::未配置 TCR_USERNAME / TCR_PASSWORD，本次只推 GHCR"
+          fi
 
   hogo:
     name: build hogo-qa
     needs: prepare
     if: needs.prepare.outputs.hogo == 'true'
     runs-on: ubuntu-latest
+    env:
+      TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+      TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -223,17 +281,35 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
+      - name: Login TCR
+        if: env.TCR_USERNAME != '' && env.TCR_PASSWORD != ''
+        run: |
+          echo "$TCR_PASSWORD" \
+            | docker login ccr.ccs.tencentyun.com -u "$TCR_USERNAME" --password-stdin
+
       - name: Build and push hogo-qa
         env:
           PREFIX: ${{ needs.prepare.outputs.prefix }}
+          TCR_PREFIX: ${{ needs.prepare.outputs.tcr_prefix }}
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
+          set -euo pipefail
+          tcr_tags=()
+          if [ -n "${TCR_USERNAME:-}" ] && [ -n "${TCR_PASSWORD:-}" ]; then
+            tcr_tags=(-t "$TCR_PREFIX-hogo-qa:$TAG" -t "$TCR_PREFIX-hogo-qa:latest")
+          fi
           docker build \
             --build-arg HOGO_BASE=/demo/hogo-qa/ \
             -t "$PREFIX-hogo-qa:$TAG" \
             -t "$PREFIX-hogo-qa:latest" \
+            "${tcr_tags[@]}" \
             projects/hogo-qa
           docker push --all-tags "$PREFIX-hogo-qa"
+          if [ ${#tcr_tags[@]} -gt 0 ]; then
+            docker push --all-tags "$TCR_PREFIX-hogo-qa"
+          else
+            echo "::notice title=TCR 跳过::未配置 TCR_USERNAME / TCR_PASSWORD，本次只推 GHCR"
+          fi
 
   # ---------------------------------------------------------------------------
   # 未重建的镜像：把当前 :latest 的 manifest 直接补成同一个 sha tag（不拉层、不重编译），
@@ -250,15 +326,25 @@ jobs:
       && needs.aps.result != 'failure'
       && needs.hogo.result != 'failure'
     runs-on: ubuntu-latest
+    env:
+      TCR_USERNAME: ${{ secrets.TCR_USERNAME }}
+      TCR_PASSWORD: ${{ secrets.TCR_PASSWORD }}
     steps:
       - name: Login GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
+      - name: Login TCR
+        if: env.TCR_USERNAME != '' && env.TCR_PASSWORD != ''
+        run: |
+          echo "$TCR_PASSWORD" \
+            | docker login ccr.ccs.tencentyun.com -u "$TCR_USERNAME" --password-stdin
+
       - name: Retag unchanged images
         env:
           PREFIX: ${{ needs.prepare.outputs.prefix }}
+          TCR_PREFIX: ${{ needs.prepare.outputs.tcr_prefix }}
           TAG: ${{ needs.prepare.outputs.tag }}
           MFG_RESULT: ${{ needs.mfg.result }}
           APS_RESULT: ${{ needs.aps.result }}
@@ -266,21 +352,31 @@ jobs:
         run: |
           set -u
 
-          alias_if_skipped() {
-            svc="$1"
-            result="$2"
+          alias_one() {
+            reg="$1"
+            label="$2"
+            svc="$3"
+            result="$4"
             [ "$result" = "skipped" ] || return 0
             if docker buildx imagetools create \
-                 -t "$PREFIX-$svc:$TAG" "$PREFIX-$svc:latest"; then
-              echo "$svc：本次未重建，已把 :latest 的 digest 补成 :$TAG"
+                 -t "$reg-$svc:$TAG" "$reg-$svc:latest"; then
+              echo "$label $svc：本次未重建，已把 :latest 的 digest 补成 :$TAG"
             else
-              echo "::warning title=$svc 缺少 $TAG::$svc 本次未重建，且 registry 上没有可复用的 :latest，$TAG 缺失"
+              echo "::warning title=$label $svc 缺少 $TAG::$label 侧未重建，且该 registry 上没有可复用的 :latest，$TAG 缺失"
             fi
           }
 
-          alias_if_skipped mfg-api    "$MFG_RESULT"
-          alias_if_skipped aps-backend "$APS_RESULT"
-          alias_if_skipped hogo-qa    "$HOGO_RESULT"
+          alias_one "$PREFIX" GHCR mfg-api     "$MFG_RESULT"
+          alias_one "$PREFIX" GHCR aps-backend "$APS_RESULT"
+          alias_one "$PREFIX" GHCR hogo-qa     "$HOGO_RESULT"
+
+          if [ -n "${TCR_USERNAME:-}" ] && [ -n "${TCR_PASSWORD:-}" ]; then
+            alias_one "$TCR_PREFIX" TCR mfg-api     "$MFG_RESULT"
+            alias_one "$TCR_PREFIX" TCR aps-backend "$APS_RESULT"
+            alias_one "$TCR_PREFIX" TCR hogo-qa     "$HOGO_RESULT"
+          else
+            echo "::warning title=TCR 跳过::未配置 TCR_USERNAME / TCR_PASSWORD，TCR 侧未补 :latest / :$TAG"
+          fi
 
   # ---------------------------------------------------------------------------
   # 汇总：列出每个镜像本次是重建还是复用，并给服务器 .env 的两行配置。
@@ -294,11 +390,13 @@ jobs:
       - name: Summary
         env:
           PREFIX: ${{ needs.prepare.outputs.prefix }}
+          TCR_PREFIX: ${{ needs.prepare.outputs.tcr_prefix }}
           TAG: ${{ needs.prepare.outputs.tag }}
           MFG_RESULT: ${{ needs.mfg.result }}
           APS_RESULT: ${{ needs.aps.result }}
           HOGO_RESULT: ${{ needs.hogo.result }}
           EVENT: ${{ github.event_name }}
+          TCR_CONFIGURED: ${{ secrets.TCR_USERNAME != '' && secrets.TCR_PASSWORD != '' }}
         run: |
           status() {
             case "$1" in
@@ -319,10 +417,26 @@ jobs:
             echo "| \`$PREFIX-aps-backend\` | $(status "$APS_RESULT") |"
             echo "| \`$PREFIX-hogo-qa\` | $(status "$HOGO_RESULT") |"
             echo ""
-            echo "服务器 .env 填："
+            echo "**GHCR（默认）** 服务器 .env 填："
             echo ""
             echo '```'
             echo "REGISTRY=$PREFIX"
             echo "IMAGE_TAG=$TAG"
             echo '```'
+            echo ""
+            echo "对应镜像：\`$PREFIX-mfg-api:$TAG\`、\`$PREFIX-aps-backend:$TAG\`、\`$PREFIX-hogo-qa:$TAG\`"
+            echo ""
+            echo "**TCR（GHCR 拉不动时切换，只改 REGISTRY）**"
+            if [ "$TCR_CONFIGURED" = "true" ]; then
+              echo ""
+              echo '```'
+              echo "REGISTRY=$TCR_PREFIX"
+              echo "IMAGE_TAG=$TAG"
+              echo '```'
+              echo ""
+              echo "对应镜像：\`$TCR_PREFIX-mfg-api:$TAG\`、\`$TCR_PREFIX-aps-backend:$TAG\`、\`$TCR_PREFIX-hogo-qa:$TAG\`"
+            else
+              echo ""
+              echo "未配置 \`TCR_USERNAME\` / \`TCR_PASSWORD\`，本次未推送 TCR。"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

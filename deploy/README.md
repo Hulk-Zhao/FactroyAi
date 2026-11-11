@@ -120,7 +120,8 @@ docker compose config --quiet && echo "compose 配置有效"
 
 | 配置位置 | 名称 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| GitHub Actions Secrets | **无** | — | `GITHUB_TOKEN` 由 Actions 自动提供 |
+| GitHub Actions Secrets | **无**（GHCR 链路） | — | `GITHUB_TOKEN` 由 Actions 自动提供 |
+| GitHub Actions Secrets | `TCR_USERNAME` / `TCR_PASSWORD` | 否 | 腾讯云 TCR 个人版访问凭证；缺任一则跳过全部 TCR 步骤，只推 GHCR，workflow 不失败 |
 | GitHub Repository Variables | `PIP_INDEX_URL` | 否 | 覆盖 pip 镜像；缺省用腾讯云镜像 |
 | GitHub Repository Variables | `APS_MAVEN_MIRROR_URL` | 否 | 覆盖 Maven 镜像；缺省用阿里云公共仓库 |
 | 广州服务器 | `GHCR_USERNAME` | 私有包必填 | GitHub 用户名 |
@@ -532,6 +533,64 @@ access-control-expose-headers: Content-Disposition, Content-Length, Content-Type
 > 不在白名单的 `Origin` 不会返回 `access-control-allow-origin`，这是预期行为。
 
 ---
+
+### 4.9 GHCR 拉不动时切换腾讯云 TCR（可选通道）
+
+现象：`docker compose pull` 一直 `Retrying in 4 seconds`，某个层卡在几百 KB 十几分钟不动。
+这是到 registry 的**网络层不可达**，不是镜像不存在，也不是鉴权问题；继续重试没有意义。
+
+CI 已支持同时推 TCR：仓库 Secrets 里配了 `TCR_USERNAME` / `TCR_PASSWORD` 就会推，
+没配则整段跳过、只推 GHCR。两套镜像一一对应，切过去只改 `REGISTRY` 一行，`IMAGE_TAG` 不变：
+
+| 服务 | GHCR | TCR |
+| --- | --- | --- |
+| mfg | `ghcr.io/hulk-zhao/factroyai-mfg-api:sha-xxxxxxx` | `ccr.ccs.tencentyun.com/hulkai/factroyai-mfg-api:sha-xxxxxxx` |
+| aps | `ghcr.io/hulk-zhao/factroyai-aps-backend:sha-xxxxxxx` | `ccr.ccs.tencentyun.com/hulkai/factroyai-aps-backend:sha-xxxxxxx` |
+| hogo | `ghcr.io/hulk-zhao/factroyai-hogo-qa:sha-xxxxxxx` | `ccr.ccs.tencentyun.com/hulkai/factroyai-hogo-qa:sha-xxxxxxx` |
+
+**开通与配置（一次性）**
+
+1. 腾讯云控制台 → 容器镜像服务 TCR → **个人版** → 开通（选广州地域）。
+2. 命名空间：新建 `hulkai`。
+3. 访问凭证：个人版实例 → 访问凭证，创建**固定密码**，得到用户名与密码
+   （不是腾讯云 SecretId/SecretKey）。
+4. GitHub 仓库 → Settings → Secrets and variables → Actions → New repository secret：
+   - `TCR_USERNAME`
+   - `TCR_PASSWORD`
+5. 重新触发一次构建（push `projects/**` 或手动 Run workflow），Summary 里会多出 TCR 两行地址。
+
+**服务器切换**
+
+```bash
+# 登录 TCR（口令走 stdin，不要写进 history / 文档）
+echo '<TCR_PASSWORD>' | docker login ccr.ccs.tencentyun.com -u '<TCR_USERNAME>' --password-stdin
+
+cd /opt/hulkai/FactroyAi/deploy/gz-api
+sed -i 's|^REGISTRY=.*|REGISTRY=ccr.ccs.tencentyun.com/hulkai/factroyai|' .env
+grep '^REGISTRY=' .env
+docker compose config --quiet
+
+# 登录后再确认 tag 存在（401/重试都不算结论）
+TAG=$(grep -E '^IMAGE_TAG=' .env | cut -d= -f2)
+for svc in mfg-api aps-backend hogo-qa; do
+  docker manifest inspect "ccr.ccs.tencentyun.com/hulkai/factroyai-$svc:$TAG" >/dev/null \
+    && echo "ok   $svc:$TAG" || echo "MISS $svc:$TAG"
+done
+
+docker compose pull
+```
+
+> `REGISTRY` 要写到**仓库名前缀**（`.../hulkai/factroyai`）。只写到命名空间
+> （`ccr.ccs.tencentyun.com/hulkai`）会拼出 `.../hulkai-mfg-api`，少一层路径，TCR 找不到仓库。
+
+**回切 GHCR**
+
+```bash
+sed -i 's|^REGISTRY=.*|REGISTRY=ghcr.io/hulk-zhao/factroyai|' .env
+docker compose pull
+```
+
+TCR 与 GHCR 用同一个 `IMAGE_TAG`（同一个提交构建），回切不需要改 tag。
 
 ## 5. 第三步：前端构建并发布静态站
 
@@ -998,6 +1057,10 @@ docker compose up -d --no-build
 确认 `REGISTRY` 全小写，且与 CI 推送的前缀完全一致。
 **不要用 401 判断镜像不存在**：GHCR 对未认证请求一律 401；登录后 `docker manifest inspect`
 返回 `not found` / `manifest unknown` 才是真的不存在。
+
+**Q：`docker compose pull` 一直 `Retrying in 4 seconds`，层卡在几百 KB？**
+到 registry 的网络层不可达（GHCR 到国内常见），不是镜像不存在，也不是鉴权问题。
+不要继续重试，按 4.9 切到腾讯云 TCR（只改 `REGISTRY` 一行，`IMAGE_TAG` 不变）。
 
 **Q：`docker manifest inspect` 三个镜像全 MISSING，是不是镜像没发布？**
 先看 gate3 的 tag 来源自检（4.4 的 3b）。如果 tag 指向的提交只改了 `deploy/` 或 `docs/`，

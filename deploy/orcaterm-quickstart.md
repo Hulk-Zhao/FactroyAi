@@ -128,7 +128,7 @@ docker compose pull                  # 只拉取，不构建，不影响运行�
 `.env` 里必须与 CI Summary 一致：
 
 ```dotenv
-REGISTRY=ghcr.io/<owner>/<repo>      # 必须全小写
+REGISTRY=ghcr.io/<owner>/<repo>      # 必须全小写；拉不动时换成 TCR，见 4.1
 IMAGE_TAG=sha-1a2b3c4                # 触发构建的那次提交，不是 HEAD；不要用 latest
 ```
 
@@ -293,6 +293,43 @@ grep -nE '^(AUTH_SECRET|MFG_ADMIN_PASS|QW_KEY|DS_KEY|DASHSCOPE_API_KEY|RERANK_AP
 grep -n 'change-me' .env
 grep -n 'your-github-name' .env      # 有输出说明 REGISTRY 还没换成真实地址
 ```
+
+### 4.1 GHCR 拉不动时切换腾讯云 TCR（可选）
+
+现象：`docker compose pull` 一直 `Retrying in 4 seconds`，某个层卡在几百 KB 十几分钟。
+这是到 registry 的**网络层不可达**，不是镜像不存在，也不是鉴权问题，继续重试没有意义。
+
+CI 会在配置了仓库 Secrets `TCR_USERNAME` / `TCR_PASSWORD` 时同时推 TCR（缺任一只推 GHCR，
+不会报错）。开通与 Secrets 配置见 [README.md](README.md#49-ghcr-拉不动时切换腾讯云-tcr可选通道) 4.9。
+推上去的地址：
+
+```text
+ccr.ccs.tencentyun.com/hulkai/factroyai-mfg-api:sha-xxxxxxx
+ccr.ccs.tencentyun.com/hulkai/factroyai-aps-backend:sha-xxxxxxx
+ccr.ccs.tencentyun.com/hulkai/factroyai-hogo-qa:sha-xxxxxxx
+```
+
+服务器切换（`IMAGE_TAG` 不变，只改 `REGISTRY`）：
+
+```bash
+echo '<TCR_PASSWORD>' | docker login ccr.ccs.tencentyun.com -u '<TCR_USERNAME>' --password-stdin
+
+cd /opt/hulkai/FactroyAi/deploy/gz-api
+sed -i 's|^REGISTRY=.*|REGISTRY=ccr.ccs.tencentyun.com/hulkai/factroyai|' .env
+grep '^REGISTRY=' .env
+docker compose config --quiet
+
+TAG=$(grep -E '^IMAGE_TAG=' .env | cut -d= -f2)
+for svc in mfg-api aps-backend hogo-qa; do
+  docker manifest inspect "ccr.ccs.tencentyun.com/hulkai/factroyai-$svc:$TAG" >/dev/null \
+    && echo "ok   $svc:$TAG" || echo "MISS $svc:$TAG"
+done
+docker compose pull
+```
+
+> `REGISTRY` 必须写到**仓库名前缀**（`.../hulkai/factroyai`）。只写 `ccr.ccs.tencentyun.com/hulkai`
+> 会拼出 `.../hulkai-mfg-api`，少一层路径，TCR 找不到仓库。
+> 回切同理：`sed -i 's|^REGISTRY=.*|REGISTRY=ghcr.io/hulk-zhao/factroyai|' .env` 后重新 `docker compose pull`。
 
 ---
 
@@ -634,6 +671,7 @@ curl -sI -H 'Host: hulkai.cn' https://hulkai.cn.cdn.dnsv1.com/
 | 容器反复重启，日志提示缺变量 | `.env` 缺键或仍是空值 | 用第 4 节的 grep 检查；`docker compose config --quiet` |
 | `invalid reference format: repository name (...) must be lowercase` | `.env` 的 `REGISTRY` 带了大写 owner（如 `Hulk-Zhao`）；Docker 在**鉴权前**就拒绝，与权限无关 | 把 `REGISTRY` 全转小写；`docker login -u` 的用户名可保留大写 |
 | `pull access denied` / `unauthorized` / 401 | 未登录 GHCR，或 token 无 `read:packages`；**401 不能用来判断镜像是否存在**（匿名请求一律 401） | 先 `docker login ghcr.io`，再 `docker manifest inspect`；`not found` / `manifest unknown` 才是真不存在 |
+| `Retrying in N seconds`，某个层卡在几百 KB 不动 | 到 registry 的网络层不可达（GHCR 到国内常见），不是镜像不存在，也不是鉴权问题 | 按 4.1 切腾讯云 TCR；重试不会变好 |
 | 三个镜像 `manifest inspect` 全 MISSING | `IMAGE_TAG` 用了 HEAD 的 sha，而该提交只改文档、没触发构建 | 按第 3 节反查「最近一次触发构建的提交」重设 tag；不是镜像没发布 |
 | gate3 提示「tag 来源不覆盖 paths」 | 同上，tag 指向的提交不在 `projects/**` / workflow 范围 | 换 tag，不要改 Dockerfile 或重发镜像 |
 | `api.hulkai.cn` 打不开 / 解析到旧 IP | DNS 未生效或仍指向香港 | `dig +short api.hulkai.cn`；用 `--resolve` 先确认服务正常，再等 TTL |
