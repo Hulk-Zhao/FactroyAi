@@ -102,7 +102,8 @@ docker compose config --quiet && echo "compose 配置有效"
 | 智能 APS 后端 | `ghcr.io/acme/factroy-ai-aps-backend:sha-1a2b3c4` |
 | Hogo-QA 后端 | `ghcr.io/acme/factroy-ai-hogo-qa:sha-1a2b3c4` |
 
-- `sha-<7 位>` 与提交一一对应，三个镜像共用同一个 tag，便于整体回滚。
+- `sha-<7 位>` 与**触发构建的提交**一一对应（不是仓库 HEAD），三个镜像共用同一个 tag，便于整体回滚。
+  只改 `deploy/`、`docs/` 的提交不会触发构建，也不会产出 tag。
 - 同时推送 `:latest`，但**生产只用 sha tag**，避免“不知道跑的是哪次提交”。
 - 每次 CI 结束，Actions 的 Summary 会直接打印本次三个完整镜像名和服务器 `.env` 两行配置，
   复制即可。
@@ -203,7 +204,7 @@ vi .env
 
 | 分组 | 键 | 必填 | 缺失 / 保留占位符的现象 |
 | --- | --- | --- | --- |
-| 镜像 | `REGISTRY`、`IMAGE_TAG` | 是 | `REGISTRY` 未替换：compose 插值报错，**一个容器都起不来**；tag 不存在：`pull`/`up` 失败 |
+| 镜像 | `REGISTRY`、`IMAGE_TAG` | 是 | `REGISTRY` 未替换：compose 插值报错，**一个容器都起不来**；`IMAGE_TAG` 取错（例如用 HEAD 而非触发构建的提交）：`pull`/`up` 失败 |
 | 拓扑 | `API_DOMAIN`、`SITE_DOMAIN`、`SITE_ORIGIN_PRIMARY`、`SITE_ORIGIN_WWW`、`NGINX_CONF` | 是（默认值可直接用） | 证书文件名对不上导致 nginx 起不来；跨域预检不带 `access-control-allow-origin` |
 | 静态源站（灾备） | `SERVE_STATIC_ORIGIN`、`SITE_ROOT` | 是（默认 `0`） | 设 `1` 但缺 `hulkai.cn` 证书 → nginx `Exited (1)`；`SITE_ROOT` 只在 `=1` 时生效 |
 | 端口 | `MFG_HOST_PORT`、`APS_BACKEND_PORT` | 是（默认即可） | 与旧容器/系统 nginx 冲突时报 `port is already allocated` |
@@ -255,6 +256,26 @@ docker compose pull                    # 只拉取，不构建，不影响运行
 如果 `pull` 报 `unauthorized`：检查 token 是否过期、是否勾选 `read:packages`、
 包是否私有（GitHub → 个人/组织 → Packages → 该包 → Visibility）。
 
+**`IMAGE_TAG` 必须取「最近一次真正触发构建的提交」，不能用 `git rev-parse --short=7 HEAD`。**
+workflow 有 `paths` 过滤，只改 `docs/`、`deploy/`、README 的提交不构建镜像
+（例如 `3c0641a` 只改了 `deploy/*.md`），其 sha 在 GHCR 里没有任何 tag；
+拿它当 `IMAGE_TAG`，下面三个 `manifest inspect` 会全 MISSING，而镜像其实挂在上一个
+触发构建的提交（如 `df57858`）上。
+
+```bash
+cd /opt/hulkai/FactroyAi
+BUILD_SHA=$(git log -1 --format=%H -- projects .github/workflows/build-images.yml | cut -c1-7)
+git show -s --format='构建提交：%h %s (%ci)' "$BUILD_SHA"
+cd deploy/gz-api
+sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=sha-$BUILD_SHA/" .env
+grep '^IMAGE_TAG=' .env
+```
+
+反查结果只是候选：还需在 Actions 里确认该提交的 `build-images` 运行成功
+（`alias` job 会把未重建镜像的 `:latest` digest 补成同一个 sha tag，一次成功运行即可覆盖三个镜像）。
+浅克隆拿不到历史时先 `git fetch --unshallow`；手动 `Run workflow` 会以当次 HEAD 产出 tag，
+只有这种情况 HEAD 的 sha 才成立。
+
 **逐个确认三个镜像的 tag 真实存在**（缺一个，`up` 会在停机后才失败）：
 
 ```bash
@@ -268,6 +289,21 @@ done
 ```
 
 本地 build 兜底时没有远端 tag，改为确认 `docker images` 里三个镜像都在。
+
+**`:latest` 能不能用**：它是「该镜像最近一次构建」的可变指针，不一定等于你选的 sha。
+`alias` job 会把未重建镜像的 `:latest` digest 补成同一个 sha tag，所以同一次成功运行下
+两者通常指向同一 manifest。用 digest 对比：
+
+```bash
+for svc in mfg-api aps-backend hogo-qa; do
+  echo "== $svc"
+  docker manifest inspect -v "$REGISTRY-$svc:latest" | grep -m1 -o '"digest": *"[^"]*"'
+  docker manifest inspect -v "$REGISTRY-$svc:$TAG"    | grep -m1 -o '"digest": *"[^"]*"'
+done
+```
+
+两行 digest 相同才可临时用 `:latest` 冒烟；不同说明它指向别的构建。
+生产仍用固定 sha tag，便于整体回滚和定位提交。
 
 ### 4.4 停机前硬门槛（三项，缺一不可）
 
@@ -290,7 +326,24 @@ TAG=$(grep -E '^IMAGE_TAG=' .env | cut -d= -f2)
 for svc in mfg-api aps-backend hogo-qa; do
   docker manifest inspect "$REGISTRY-$svc:$TAG" >/dev/null && echo "gate3 ok  $svc:$TAG" || echo "gate3 FAIL: $svc:$TAG 不存在"
 done
+
+# 3b) tag 来源自检：这个 sha 是不是「真正触发构建」的提交
+TAG_SHA=${TAG#sha-}
+if TAG_FULL=$(git -C /opt/hulkai/FactroyAi rev-parse --verify --quiet "${TAG_SHA}^{commit}"); then
+  git -C /opt/hulkai/FactroyAi show -s --format='tag 对应提交：%h %s (%ci)' "$TAG_FULL"
+  if git -C /opt/hulkai/FactroyAi diff-tree -r --no-commit-id --name-only -m "$TAG_FULL" \
+       | grep -qE '^(projects/|\.github/workflows/build-images\.yml)'; then
+    echo 'tag 来源覆盖 paths：该提交会触发构建'
+  else
+    echo 'tag 来源不覆盖 paths：该提交没动 projects/** 或 workflow，不会产出镜像'
+    echo '→ 用 HEAD 的 sha 会 MISSING，这不是镜像问题；按 4.3 反查触发构建的提交'
+  fi
+else
+  echo "本地历史里找不到 $TAG，检查 IMAGE_TAG 是否写错或来自别的仓库"
+fi
 ```
+
+> 三个全 MISSING 时先看 3b 的结论：**如果是「不覆盖 paths」，换 tag 而不是去查 GHCR**。
 
 再补两个「配件」检查（同样不停机）：
 
@@ -798,7 +851,8 @@ docker compose -f deploy/gz-api/docker-compose.yml images
 ### 9.1 后端
 
 1. push 到 `main`，等 `build-images` 变绿；
-2. 打开本次 Actions 的 Summary，复制 `REGISTRY` 与 `IMAGE_TAG`；
+2. 打开本次 Actions 的 Summary，复制 `REGISTRY` 与 `IMAGE_TAG`
+   （tag 对应**触发构建的这次提交**；`git pull` 后 HEAD 可能只是文档提交，不要拿它当 tag）；
 3. 服务器：
 
 ```bash
@@ -806,6 +860,7 @@ cd /opt/hulkai/FactroyAi
 git pull --ff-only
 cd deploy/gz-api
 
+# 填 CI Summary 的 sha tag，不是 HEAD
 sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=sha-1a2b3c4/' .env
 docker compose pull
 docker compose up -d --no-build
@@ -905,6 +960,11 @@ docker compose up -d --no-build
 **Q：`docker compose pull` 报 `unauthorized` / `denied`？**
 私有包需要先 `docker login ghcr.io`，token 勾 `read:packages`；或把包改为 Public。
 确认 `REGISTRY` 全小写，且与 CI 推送的前缀完全一致。
+
+**Q：`docker manifest inspect` 三个镜像全 MISSING，是不是镜像没发布？**
+先看 gate3 的 tag 来源自检（4.4 的 3b）。如果 tag 指向的提交只改了 `deploy/` 或 `docs/`，
+它根本不会触发构建——`paths` 过滤只认 `projects/**` 与 `.github/workflows/build-images.yml`。
+按 4.3 反查最近一次触发构建的提交重设 `IMAGE_TAG`，不要重发镜像。
 
 **Q：`docker compose up` 又想本地 build？**
 服务器统一加 `--no-build`。Compose 同时声明了 `build:` 与 `image:`，不加 `--no-build` 时

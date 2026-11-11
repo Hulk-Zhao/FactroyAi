@@ -15,6 +15,11 @@
 #   纯文档改动（docs/、README、deploy/*.md 等）或 deploy/ 下与镜像无关的改动不触发。
 #   workflow_dispatch 手动触发不受 paths 限制，永远全量构建三个镜像。
 #
+#   ⚠️ tag 是「本 workflow 实际运行的那次提交」，不是仓库 HEAD。只改 deploy/、docs/
+#   的提交不会产出任何 tag，其 sha 在 GHCR 里查不到。部署文档引用 tag 时必须以
+#   「最近一次触发构建的提交」为准，反查：
+#     git log -1 --format=%h -- projects .github/workflows/build-images.yml
+#
 # 单镜像（job 级 if，由 prepare 里 git diff 的结果决定，不引入第三方 action）：
 #   - projects/mfg-agent/api/**              → 只重建 mfg-api
 #   - projects/smart-aps-agent/**            → 只重建 aps-backend
