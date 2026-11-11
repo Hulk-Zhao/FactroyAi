@@ -10,8 +10,16 @@ import { isMockEnabled } from '@/mocks'
 
 const router = useRouter()
 
-const username = ref('')
-const password = ref('')
+/**
+ * 演示站口径与 mfg / hogo 对齐：账号固定 admin、口令 123。
+ * 用户名只读展示（仍随表单提交），口令预填但可修改——
+ * 用户手改口令后仍能正常提交，用于验证 40100 错误提示。
+ */
+const DEMO_USERNAME = 'admin'
+const DEMO_PASSWORD = '123'
+
+const username = ref(DEMO_USERNAME)
+const password = ref(DEMO_PASSWORD)
 const submitting = ref(false)
 const errorMessage = ref('')
 
@@ -106,9 +114,9 @@ onMounted(() => {
         <el-form-item label="用户名">
           <el-input
             v-model="username"
-            placeholder="请输入用户名"
+            placeholder="演示账号固定为 admin"
             autocomplete="username"
-            clearable
+            readonly
             @keyup.enter="onSubmit"
           />
         </el-form-item>
@@ -134,6 +142,9 @@ onMounted(() => {
         </el-button>
       </el-form>
 
+      <p class="mock-hint">
+        演示账号 <code>admin</code> / 口令 <code>123</code>（已预填，可直接登录）
+      </p>
       <p v-if="mockEnabled" class="mock-hint">
         Mock 调试账号：<code>admin / admin123</code>（输入错误密码可验证 40100 提示）
       </p>
