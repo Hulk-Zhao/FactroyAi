@@ -8,7 +8,30 @@
 #
 # 服务器只做 login / pull / up，不在 4C4G 机器上编译。
 #
-# 触发：push 到 main，或在 Actions 页面手动 Run workflow。
+# 触发（workflow 级 paths）：
+#   push 到 main 且改动命中以下路径才跑：
+#     - projects/**                          三个镜像的构建上下文都在这里
+#     - .github/workflows/build-images.yml   构建逻辑本身
+#   纯文档改动（docs/、README、deploy/*.md 等）或 deploy/ 下与镜像无关的改动不触发。
+#   workflow_dispatch 手动触发不受 paths 限制，永远全量构建三个镜像。
+#
+# 单镜像（job 级 if，由 prepare 里 git diff 的结果决定，不引入第三方 action）：
+#   - projects/mfg-agent/api/**              → 只重建 mfg-api
+#   - projects/smart-aps-agent/**            → 只重建 aps-backend
+#   - projects/hogo-qa/**                    → 只重建 hogo-qa
+#   - .github/workflows/build-images.yml     → 三个都重建
+#   其余路径（例如 projects/ 之外、deploy/ 运行配置）不触发任何镜像构建。
+#
+# 未重建的镜像不重新编译：用 docker buildx imagetools 把当前 :latest 的 digest
+# 补成同一个 sha tag。这样服务器仍然可以「一个 IMAGE_TAG 拉三个镜像」，
+# 也保持「换 tag 整体回滚」的用法不变。
+#
+# 新增模块时需要同步改 4 处：
+#   1) 顶部 on.push.paths：构建上下文若不在 projects/ 下，把那个目录加进去
+#   2) prepare 的 Detect changed paths：加一条 case 分支（路径 → 新 job 的输出）
+#   3) 新增一个 build job：复制现有 job，改 context / Dockerfile / 镜像名 / if
+#   4) alias 与 summary：镜像列表各加一项，否则未重建时不会补 tag、汇总也不显示
+#
 # 所需凭据：GITHUB_TOKEN 自动提供（permissions.packages: write），无需额外 secret。
 # =============================================================================
 name: build-images
@@ -16,6 +39,9 @@ name: build-images
 on:
   push:
     branches: [main]
+    paths:
+      - 'projects/**'
+      - '.github/workflows/build-images.yml'
   workflow_dispatch:
 
 permissions:
@@ -27,11 +53,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  # ---------------------------------------------------------------------------
+  # 变更检测：算出三个镜像各自是否需要重建。
+  # workflow_dispatch、首次推送、强制推送（before 提交取不到）一律按全量处理。
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: 变更检测
     runs-on: ubuntu-latest
+    outputs:
+      prefix: ${{ steps.meta.outputs.prefix }}
+      tag: ${{ steps.meta.outputs.tag }}
+      mfg: ${{ steps.changes.outputs.mfg }}
+      aps: ${{ steps.changes.outputs.aps }}
+      hogo: ${{ steps.changes.outputs.hogo }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 要对比 push 前后的差异，浅克隆拿不到 before 提交
+          fetch-depth: 0
 
       - name: Compute image prefix and tag
         id: meta
@@ -44,6 +84,72 @@ jobs:
           echo "镜像前缀：$prefix"
           echo "本次 tag：$tag"
 
+      - name: Detect changed paths
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          all=false
+          reason="按变更路径判断"
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            all=true
+            reason="手动触发，全量构建"
+          elif [ -z "${BEFORE:-}" ] \
+               || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+               || ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            all=true
+            reason="拿不到可对比的 before 提交（首次推送或强制推送），全量构建"
+          fi
+
+          mfg=false
+          aps=false
+          hogo=false
+
+          if [ "$all" = true ]; then
+            mfg=true
+            aps=true
+            hogo=true
+          else
+            changed=$(git diff --name-only "$BEFORE" "$AFTER")
+            echo "本次改动文件（最多显示 50 条）："
+            printf '%s\n' "$changed" | sed -n '1,50p'
+
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              case "$f" in
+                projects/mfg-agent/api/*)           mfg=true ;;
+                projects/smart-aps-agent/*)         aps=true ;;
+                projects/hogo-qa/*)                 hogo=true ;;
+                .github/workflows/build-images.yml) mfg=true; aps=true; hogo=true ;;
+              esac
+            done <<< "$changed"
+          fi
+
+          {
+            echo "mfg=$mfg"
+            echo "aps=$aps"
+            echo "hogo=$hogo"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "判定：mfg-api=$mfg aps-backend=$aps hogo-qa=$hogo（$reason）"
+
+  # ---------------------------------------------------------------------------
+  # 三个镜像各自构建；只有 prepare 判定有变化时才会跑（job 级 if）。
+  # ---------------------------------------------------------------------------
+  mfg:
+    name: build mfg-api
+    needs: prepare
+    if: needs.prepare.outputs.mfg == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Login GHCR
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
@@ -51,8 +157,8 @@ jobs:
 
       - name: Build and push mfg-api
         env:
-          PREFIX: ${{ steps.meta.outputs.prefix }}
-          TAG: ${{ steps.meta.outputs.tag }}
+          PREFIX: ${{ needs.prepare.outputs.prefix }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           docker build \
             --build-arg PIP_INDEX_URL=${{ vars.PIP_INDEX_URL || 'https://mirrors.cloud.tencent.com/pypi/simple' }} \
@@ -61,10 +167,24 @@ jobs:
             projects/mfg-agent/api
           docker push --all-tags "$PREFIX-mfg-api"
 
+  aps:
+    name: build aps-backend
+    needs: prepare
+    if: needs.prepare.outputs.aps == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
       - name: Build and push aps-backend
         env:
-          PREFIX: ${{ steps.meta.outputs.prefix }}
-          TAG: ${{ steps.meta.outputs.tag }}
+          PREFIX: ${{ needs.prepare.outputs.prefix }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           docker build \
             -f projects/smart-aps-agent/aps-admin/Dockerfile \
@@ -74,10 +194,24 @@ jobs:
             projects/smart-aps-agent
           docker push --all-tags "$PREFIX-aps-backend"
 
+  hogo:
+    name: build hogo-qa
+    needs: prepare
+    if: needs.prepare.outputs.hogo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
       - name: Build and push hogo-qa
         env:
-          PREFIX: ${{ steps.meta.outputs.prefix }}
-          TAG: ${{ steps.meta.outputs.tag }}
+          PREFIX: ${{ needs.prepare.outputs.prefix }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           docker build \
             --build-arg HOGO_BASE=/demo/hogo-qa/ \
@@ -86,21 +220,94 @@ jobs:
             projects/hogo-qa
           docker push --all-tags "$PREFIX-hogo-qa"
 
-      - name: Summary
+  # ---------------------------------------------------------------------------
+  # 未重建的镜像：把当前 :latest 的 manifest 直接补成同一个 sha tag（不拉层、不重编译），
+  # 保证服务器用单个 IMAGE_TAG 仍能拉到三个镜像。
+  # :latest 不存在（例如首次发布只包含一个模块）时只告警，不阻断已成功的构建。
+  # ---------------------------------------------------------------------------
+  alias:
+    name: 补齐未重建镜像的 tag
+    needs: [prepare, mfg, aps, hogo]
+    if: |
+      always() && !cancelled()
+      && needs.prepare.result == 'success'
+      && needs.mfg.result != 'failure'
+      && needs.aps.result != 'failure'
+      && needs.hogo.result != 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Login GHCR
         run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Retag unchanged images
+        env:
+          PREFIX: ${{ needs.prepare.outputs.prefix }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          MFG_RESULT: ${{ needs.mfg.result }}
+          APS_RESULT: ${{ needs.aps.result }}
+          HOGO_RESULT: ${{ needs.hogo.result }}
+        run: |
+          set -u
+
+          alias_if_skipped() {
+            svc="$1"
+            result="$2"
+            [ "$result" = "skipped" ] || return 0
+            if docker buildx imagetools create \
+                 -t "$PREFIX-$svc:$TAG" "$PREFIX-$svc:latest"; then
+              echo "$svc：本次未重建，已把 :latest 的 digest 补成 :$TAG"
+            else
+              echo "::warning title=$svc 缺少 $TAG::$svc 本次未重建，且 registry 上没有可复用的 :latest，$TAG 缺失"
+            fi
+          }
+
+          alias_if_skipped mfg-api    "$MFG_RESULT"
+          alias_if_skipped aps-backend "$APS_RESULT"
+          alias_if_skipped hogo-qa    "$HOGO_RESULT"
+
+  # ---------------------------------------------------------------------------
+  # 汇总：列出每个镜像本次是重建还是复用，并给服务器 .env 的两行配置。
+  # ---------------------------------------------------------------------------
+  summary:
+    name: 汇总
+    needs: [prepare, mfg, aps, hogo, alias]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        env:
+          PREFIX: ${{ needs.prepare.outputs.prefix }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          MFG_RESULT: ${{ needs.mfg.result }}
+          APS_RESULT: ${{ needs.aps.result }}
+          HOGO_RESULT: ${{ needs.hogo.result }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          status() {
+            case "$1" in
+              success) echo "重建并推送" ;;
+              skipped) echo "未变化，复用已有镜像" ;;
+              *)       echo "失败（$1）" ;;
+            esac
+          }
+
           {
             echo "### 本次镜像"
             echo ""
-            echo '```'
-            echo "${{ steps.meta.outputs.prefix }}-mfg-api:${{ steps.meta.outputs.tag }}"
-            echo "${{ steps.meta.outputs.prefix }}-aps-backend:${{ steps.meta.outputs.tag }}"
-            echo "${{ steps.meta.outputs.prefix }}-hogo-qa:${{ steps.meta.outputs.tag }}"
-            echo '```'
+            echo "触发方式：\`$EVENT\`，tag：\`$TAG\`"
+            echo ""
+            echo "| 镜像 | 状态 |"
+            echo "| --- | --- |"
+            echo "| \`$PREFIX-mfg-api\` | $(status "$MFG_RESULT") |"
+            echo "| \`$PREFIX-aps-backend\` | $(status "$APS_RESULT") |"
+            echo "| \`$PREFIX-hogo-qa\` | $(status "$HOGO_RESULT") |"
             echo ""
             echo "服务器 .env 填："
             echo ""
             echo '```'
-            echo "REGISTRY=${{ steps.meta.outputs.prefix }}"
-            echo "IMAGE_TAG=${{ steps.meta.outputs.tag }}"
+            echo "REGISTRY=$PREFIX"
+            echo "IMAGE_TAG=$TAG"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
