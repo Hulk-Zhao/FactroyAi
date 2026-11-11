@@ -5,7 +5,8 @@
 >
 > 代码仓库：`<YOUR_GIT_REPO_URL>`（TODO：换成新仓库地址）
 > 固定目录：`/opt/hulkai/FactroyAi`
-> 镜像来源：默认 **GHCR pull**；无 CI 时可用服务器本地 build（见第 3 节）。
+> 镜像来源：**当前线上为服务器本地构建**（`.env` 里 `REGISTRY=local`、`IMAGE_TAG=local`，
+> 见 3.B）；GHCR / TCR pull 是可选通道（3.A、4.1），不是线上默认。
 >
 > **顺序不能颠倒**：第 2–5 节（克隆仓库、拉镜像并校验 tag、`.env`、证书）全部在旧栈
 > **运行中**完成，第 6 节才是停机窗口。仓库 / `.env` / 镜像 tag 任何一项没就绪就停旧栈，
@@ -103,15 +104,15 @@ git pull --ff-only
 
 ## 3. 拉取镜像并校验 tag（旧栈运行时执行）
 
-| | A. GHCR `pull`（推荐） | B. 服务器本地 `build` |
+| | A. registry `pull`（可选） | B. 服务器本地构建（当前线上） |
 | --- | --- | --- |
-| 前提 | 新仓库已跑过 GitHub Actions | 无 CI，或 CI 不可用 |
-| 服务器负载 | 只下载镜像 | 编译 3 个后端，峰值 3–4G 内存 |
-| 耗时 | 数分钟（取决于带宽） | 20–40 分钟，且要先加 swap |
-| 可回滚性 | 换 `IMAGE_TAG` 即可 | 需重新 build |
-| 适用 | 日常上线 | 临时兜底 |
+| 前提 | 已跑过 GitHub Actions，且 GHCR/TCR 可达 | 无 CI，或 registry 拉不动 |
+| 服务器负载 | 只下载镜像 | 串行编译 3 个后端，峰值 3–4G 内存 |
+| 耗时 | 数分钟（取决于带宽） | hogo / aps 数分钟；mfg 改镜像源后实测 77 秒 |
+| 可回滚性 | 换 `IMAGE_TAG` 即可 | 需重新 build，没有 registry 可回拉 |
+| 适用 | 多机分发 | 单机、网络受限（当前线上） |
 
-### A. GHCR（默认推荐）
+### A. GHCR / TCR（可选）
 
 ```bash
 cd /opt/hulkai/FactroyAi/deploy/gz-api
@@ -212,7 +213,10 @@ done
 > 判断存在性必须**先登录**再 `docker manifest inspect`；
 > 返回 `not found` / `manifest unknown` 才是真的不存在。
 
-### B. 服务器本地 build（仅兜底）
+### B. 服务器本地构建（当前线上实际路径）
+
+**什么时候用**：`docker pull` 从 GHCR 极慢、`docker push` 到 TCR 也极慢，或 CI 不可用。
+2026-11-11 线上就是这条路径（clone 能通，镜像层拉/推都卡死）。
 
 4C4G 必须先加 **2G swap**，否则 Maven 编译阶段会被 OOM Kill：
 
@@ -225,15 +229,45 @@ grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee 
 free -h
 ```
 
-```bash
-cd /opt/hulkai/FactroyAi/deploy/gz-api
-COMPOSE_PARALLEL_LIMIT=1 docker compose build    # 串行构建，避免同时吃满内存
-docker compose up -d
+`.env` 只改两行（`IMAGE_TAG` 用固定值即可，本地没有远端 tag 需要对齐）：
+
+```dotenv
+REGISTRY=local
+IMAGE_TAG=local
 ```
 
-本地 build 时 `REGISTRY` / `IMAGE_TAG` 也要填（仅作为镜像名，不从远端拉取），
-例如 `REGISTRY=local`、`IMAGE_TAG=dev`；下次切回 GHCR 前记得改回真实值。
-本地 build 没有远端 tag，第 3 节的 `manifest inspect` 校验跳过，改为确认 `docker images` 里三个镜像都在。
+**串行、由小到大构建**（同时构建会超过 4G 物理内存）：
+
+```bash
+cd /opt/hulkai/FactroyAi/deploy/gz-api
+export REGISTRY=local IMAGE_TAG=local
+
+COMPOSE_PARALLEL_LIMIT=1 docker compose build hogo-qa
+COMPOSE_PARALLEL_LIMIT=1 docker compose build aps-backend
+COMPOSE_PARALLEL_LIMIT=1 docker compose build app       # mfg-api 最后
+
+docker images | grep -E 'local-(mfg-api|aps-backend|hogo-qa)'
+docker compose up -d --no-build
+```
+
+实测（广州 4C4G，2026-11-11）：
+
+| 镜像 | 体积 | 备注 |
+| --- | --- | --- |
+| hogo-qa | 171 MB | Node 前端构建 |
+| aps-backend | 469 MB | Maven 编译，峰值内存最高 |
+| mfg-api | 851 MB | 首次 `apt-get update` 卡死 4 分钟；改腾讯云 apt 源后单次构建 **77 秒** |
+
+mfg-api 的 apt 源已写进 `projects/mfg-agent/api/Dockerfile`：`ARG APT_MIRROR`
+默认 `http://mirrors.cloud.tencent.com`，构建时改写 deb822 的 `debian.sources`
+（amd64 / arm64 同一套）；要回官方源加 `--build-arg APT_MIRROR=http://deb.debian.org`。
+
+本地构建没有远端 tag，`manifest inspect` 校验跳过，改为确认 `docker images` 里三个镜像都在；
+`docker compose pull` 对 `local-*` 会失败，起栈必须带 `--no-build`。
+
+> **本地构建的镜像不带来源标记**：只在本机 `/var/lib/docker`，没有 registry 可回拉。
+> 换机器、重装、清理镜像后必须重新构建；要跨机分发就走 CI（A）或 `docker save` /
+> `docker load`。回切 registry 时把 `REGISTRY` / `IMAGE_TAG` 改回真实值再 `pull`。
 
 ---
 
@@ -415,26 +449,35 @@ REGISTRY=$(grep -E '^REGISTRY=' .env | cut -d= -f2)
   && echo 'gate2 REGISTRY 小写 ok' \
   || echo 'gate2 FAIL: REGISTRY 含大写 → 先转小写，否则 pull 报 invalid reference format'
 
-# 3) 三个镜像 tag 都存在（本地 build 场景改为 docker images 确认）
+# 3) 三个镜像都在（registry 用 manifest；本地构建用 docker images）
 REGISTRY=$(grep -E '^REGISTRY=' .env | cut -d= -f2)
 TAG=$(grep -E '^IMAGE_TAG=' .env | cut -d= -f2)
-for svc in mfg-api aps-backend hogo-qa; do
-  docker manifest inspect "$REGISTRY-$svc:$TAG" >/dev/null && echo "gate3 ok  $svc:$TAG" || echo "gate3 FAIL: $svc:$TAG 不存在"
-done
 
-# 3b) tag 来源自检：这个 sha 是不是「真正触发构建」的提交
-TAG_SHA=${TAG#sha-}
-if TAG_FULL=$(git -C /opt/hulkai/FactroyAi rev-parse --verify --quiet "${TAG_SHA}^{commit}"); then
-  git -C /opt/hulkai/FactroyAi show -s --format='tag 对应提交：%h %s (%ci)' "$TAG_FULL"
-  if git -C /opt/hulkai/FactroyAi diff-tree -r --no-commit-id --name-only -m "$TAG_FULL" \
-       | grep -qE '^(projects/|\.github/workflows/build-images\.yml)'; then
-    echo 'tag 来源覆盖 paths：该提交会触发构建'
-  else
-    echo 'tag 来源不覆盖 paths：该提交没动 projects/** 或 workflow，不会产出镜像'
-    echo '→ 用 HEAD 的 sha 会 MISSING，这不是镜像问题；按第 3 节反查触发构建的提交'
-  fi
+if [ "$REGISTRY" = "local" ]; then
+  # 本地构建：没有 registry，也没有 sha tag；只确认镜像存在
+  docker images --format '{{.Repository}}:{{.Tag}}' \
+    | grep -E '^local-(mfg-api|aps-backend|hogo-qa):' \
+    && echo 'gate3 本地镜像 ok' \
+    || echo 'gate3 FAIL: 本地镜像缺失，按 3.B 构建'
 else
-  echo "本地历史里找不到 $TAG，检查 IMAGE_TAG 是否写错或来自别的仓库"
+  for svc in mfg-api aps-backend hogo-qa; do
+    docker manifest inspect "$REGISTRY-$svc:$TAG" >/dev/null && echo "gate3 ok  $svc:$TAG" || echo "gate3 FAIL: $svc:$TAG 不存在"
+  done
+
+  # 3b) tag 来源自检：这个 sha 是不是「真正触发构建」的提交
+  TAG_SHA=${TAG#sha-}
+  if TAG_FULL=$(git -C /opt/hulkai/FactroyAi rev-parse --verify --quiet "${TAG_SHA}^{commit}"); then
+    git -C /opt/hulkai/FactroyAi show -s --format='tag 对应提交：%h %s (%ci)' "$TAG_FULL"
+    if git -C /opt/hulkai/FactroyAi diff-tree -r --no-commit-id --name-only -m "$TAG_FULL" \
+         | grep -qE '^(projects/|\.github/workflows/build-images\.yml)'; then
+      echo 'tag 来源覆盖 paths：该提交会触发构建'
+    else
+      echo 'tag 来源不覆盖 paths：该提交没动 projects/** 或 workflow，不会产出镜像'
+      echo '→ 用 HEAD 的 sha 会 MISSING，这不是镜像问题；按第 3 节反查触发构建的提交'
+    fi
+  else
+    echo "本地历史里找不到 $TAG，检查 IMAGE_TAG 是否写错或来自别的仓库"
+  fi
 fi
 ```
 

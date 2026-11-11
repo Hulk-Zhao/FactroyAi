@@ -17,9 +17,26 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl tzdata \
-    && rm -rf /var/lib/apt/lists/*
+# Debian 12 (bookworm) 使用 deb822 格式的 /etc/apt/sources.list.d/debian.sources。
+# 国内直连 deb.debian.org 常无响应（apt-get update 卡住数分钟），默认改走腾讯云镜像；
+# 需要官方源时覆盖：--build-arg APT_MIRROR=http://deb.debian.org
+# 该文件与 URI 不区分架构，amd64 / arm64 同一套改写。
+ARG APT_MIRROR=http://mirrors.cloud.tencent.com
+RUN set -eux; \
+    if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+      sed -i \
+        -e "s|http://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g" \
+        -e "s|http://deb.debian.org/debian|${APT_MIRROR}/debian|g" \
+        /etc/apt/sources.list.d/debian.sources; \
+    else \
+      sed -i \
+        -e "s|http://deb.debian.org/debian-security|${APT_MIRROR}/debian-security|g" \
+        -e "s|http://deb.debian.org/debian|${APT_MIRROR}/debian|g" \
+        /etc/apt/sources.list; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl tzdata; \
+    rm -rf /var/lib/apt/lists/*
 
 # 依赖层：先装依赖，改业务代码不触发重装
 COPY pyproject.toml README.md ./

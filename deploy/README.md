@@ -8,12 +8,14 @@
 > - CNAME：`hulkai.cn.cdn.dnsv1.com`；
 > - **`www.hulkai.cn` 尚未单独创建加速域名**，需按 7.2 补一条同源配置；
 > - 广州轻量服务器（4C4G / 5Mbps）只做 `api.hulkai.cn` 网关，静态流量全部走 CDN；
-> - 后端镜像由 GitHub Actions 构建推 GHCR，服务器只 `docker login → pull → up`；
+> - 后端镜像**当前由服务器本地构建**（`.env` 里 `REGISTRY=local`、`IMAGE_TAG=local`，
+>   见 3.4）；CI 产 GHCR / TCR 是**可选分发路径**，不是线上默认；
 > - 自有源静态（`SERVE_STATIC_ORIGIN=1`）**降级为灾备**，默认关闭，启用条件见 7.8。
 
 ```
-  GitHub 新仓库 ──push main──▶ Actions ──▶ GHCR
-                                            │ docker pull
+  GitHub 新仓库 ──push main──▶ Actions ──▶ GHCR / TCR（可选分发）
+  当前线上：服务器本地构建（REGISTRY=local），不经过任何 registry
+                                            │ 可选：docker pull
                                             ▼
   hulkai.cn / www ──▶ 腾讯云 CDN ──▶ COS（hulkai-cdn-1301421942）
   api.hulkai.cn ──────────────────▶ 广州单机 Nginx :443
@@ -82,7 +84,10 @@ docker compose config --quiet && echo "compose 配置有效"
 
 ---
 
-## 3. 第一步：CI 构建镜像（GitHub Actions → GHCR）
+## 3. 第一步（可选）：CI 构建镜像（GHCR / TCR）
+
+> 当前线上**没走本节**，而是用 3.4 的服务器本地构建。GHCR 到国内长期拉不动时，
+> CI 这条路可以先跳过；只有需要"一次构建、多机分发"时才值得启用。
 
 ### 3.1 工作流与触发
 
@@ -132,25 +137,54 @@ docker compose config --quiet && echo "compose 配置有效"
 > 如果 GHCR 包设为 Public，服务器可以不 login 直接 pull；私有包则必须用
 > `GHCR_READ_TOKEN`。Token 只放在服务器 shell 环境或凭据管理器里，不要提交。
 
-### 3.4 本地 build 备选（不推荐在生产机用）
+### 3.4 本地构建（当前线上实际路径）
 
-Compose 里保留了 `build:` 段，作为 CI 不可用时的兜底：
+**什么时候用**：`docker pull` 从 GHCR 极慢、`docker push` 到 TCR 也极慢，或 CI 不可用。
+2026-11-11 的线上切换就是这条路径：服务器访问 GitHub 正常（`curl` 探测 000 是假阴性），
+但镜像层拉取/推送都卡死，最终改为服务器本地构建。
 
-```bash
-cd deploy/gz-api
-REGISTRY=local IMAGE_TAG=dev docker compose build
+`.env` 只需两行：
+
+```dotenv
+REGISTRY=local
+IMAGE_TAG=local
 ```
 
-4C4G 上的内存代价（实测口径为构建峰值，非镜像大小）：
+compose 解析出 `local-mfg-api:local`、`local-aps-backend:local`、`local-hogo-qa:local`
+（`REGISTRY` 与 `IMAGE_TAG` 的拼接规则见 4.2）。4C4G 必须先加 2G swap（见第 2 节），
+并且**串行、由小到大**构建：
 
-| 镜像 | 构建阶段 | 峰值内存 | 耗时参考 |
-| --- | --- | --- | --- |
-| mfg-api | `pip install`（FastAPI/Chroma 等） | 约 1.0–1.5 GB | 5–10 分钟 |
-| aps-backend | Maven 编译 + JVM | 约 2.5–3.0 GB | 8–15 分钟 |
-| hogo-qa | Node 前端构建 | 约 0.8–1.0 GB | 2–4 分钟 |
+```bash
+cd /opt/hulkai/FactroyAi/deploy/gz-api
+export REGISTRY=local IMAGE_TAG=local
 
-同时构建会超过 4G 物理内存，必须 `COMPOSE_PARALLEL_LIMIT=1` 并依赖 swap，耗时也会显著变长。
-**推荐始终走 CI**，生产机只 pull。
+COMPOSE_PARALLEL_LIMIT=1 docker compose build hogo-qa
+COMPOSE_PARALLEL_LIMIT=1 docker compose build aps-backend
+COMPOSE_PARALLEL_LIMIT=1 docker compose build app       # mfg-api 最后
+docker images | grep -E 'local-(mfg-api|aps-backend|hogo-qa)'
+docker compose up -d --no-build
+```
+
+实测（广州 4C4G，2026-11-11；体积为 `docker images` 口径）：
+
+| 镜像 | 体积 | 备注 |
+| --- | --- | --- |
+| hogo-qa | 171 MB | Node 前端构建 |
+| aps-backend | 469 MB | Maven 编译，峰值内存最高 |
+| mfg-api | 851 MB | 首次 `apt-get update` 曾卡死 4 分钟；改腾讯云 apt 源后单次构建 **77 秒** |
+
+mfg-api 的 apt 源已写进 `projects/mfg-agent/api/Dockerfile`：
+`ARG APT_MIRROR` 默认 `http://mirrors.cloud.tencent.com`，构建时改写 deb822 的
+`debian.sources`（amd64 / arm64 同一套）；需要官方源时加
+`--build-arg APT_MIRROR=http://deb.debian.org`。pip 默认也走腾讯云镜像。
+
+> **本地构建的镜像没有来源标记**：只存在于本机 `/var/lib/docker`，没有 registry 可回拉。
+> `docker compose pull` 对 `local-*` 会失败，部署必须用 `docker compose up -d --no-build`。
+> 换机器、重装、清理镜像后都要重新构建；要跨机分发就回到 CI（3.1–3.3），
+> 或 `docker save | ssh ... docker load`。
+
+> 峰值内存：mfg 约 1.0–1.5 GB、APS 约 2.5–3.0 GB、hogo 约 0.8–1.0 GB。
+> 同时构建会超过 4G 物理内存，所以必须 `COMPOSE_PARALLEL_LIMIT=1` 并依赖 swap。
 
 ---
 
@@ -211,7 +245,7 @@ vi .env
 
 | 分组 | 键 | 必填 | 缺失 / 保留占位符的现象 |
 | --- | --- | --- | --- |
-| 镜像 | `REGISTRY`、`IMAGE_TAG` | 是 | `REGISTRY` 未替换：compose 插值报错，**一个容器都起不来**；`REGISTRY` 含大写：`pull` 在鉴权前报 `invalid reference format ... must be lowercase`；`IMAGE_TAG` 取错（例如用 HEAD 而非触发构建的提交）：`pull`/`up` 失败 |
+| 镜像 | `REGISTRY`、`IMAGE_TAG` | 是 | `REGISTRY` 未替换：compose 插值报错，**一个容器都起不来**；`REGISTRY` 含大写：`pull` 在鉴权前报 `invalid reference format ... must be lowercase`；`IMAGE_TAG` 取错（例如用 HEAD 而非触发构建的提交）：`pull`/`up` 失败；本地构建时填 `REGISTRY=local`、`IMAGE_TAG=local`（见 3.4） |
 | 拓扑 | `API_DOMAIN`、`SITE_DOMAIN`、`SITE_ORIGIN_PRIMARY`、`SITE_ORIGIN_WWW`、`NGINX_CONF` | 是（默认值可直接用） | 证书文件名对不上导致 nginx 起不来；跨域预检不带 `access-control-allow-origin` |
 | 静态源站（灾备） | `SERVE_STATIC_ORIGIN`、`SITE_ROOT` | 是（默认 `0`） | 设 `1` 但缺 `hulkai.cn` 证书 → nginx `Exited (1)`；`SITE_ROOT` 只在 `=1` 时生效 |
 | 端口 | `MFG_HOST_PORT`、`APS_BACKEND_PORT` | 是（默认即可） | 与旧容器/系统 nginx 冲突时报 `port is already allocated` |
@@ -259,6 +293,9 @@ cd /opt/hulkai/FactroyAi/deploy/gz-api
 docker compose config --quiet          # 只解析配置：仓库/.env/变量插值一次暴露
 docker compose pull                    # 只拉取，不构建，不影响运行中的旧栈
 ```
+
+> **当前线上是本地构建**（`REGISTRY=local`、`IMAGE_TAG=local`）：跳过本节的
+> login / `pull` / `manifest inspect`，直接按 3.4 构建，再用 `up -d --no-build` 起栈。
 
 如果 `pull` 报 `invalid reference format: repository name (...) must be lowercase`：
 `REGISTRY` 里带了大写 owner（GitHub 显示 `Hulk-Zhao`，路径必须 `hulk-zhao`）。
