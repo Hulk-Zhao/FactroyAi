@@ -51,6 +51,37 @@ public final class LlmEndpointResolver {
     }
 
     /**
+     * 解析本次实际生效的 provider。
+     *
+     * <p>显式设置了 {@code APS_AGENT_LLM_PROVIDER / LLM_PROVIDER} 时一律尊重该选择
+     * （包括 {@code none}）；未显式设置且 {@code ds_url + ds_key} 齐备时自动启用
+     * {@code deepseek}，让现场只需提供端点与密钥即可演示 AI 解读。
+     * 本方法只读取环境变量名是否存在，不读取、不记录密钥值。</p>
+     *
+     * @param llm LLM 配置
+     * @return 规范化后的 provider 名；无法确定时返回 {@code none}
+     */
+    public static String effectiveProvider(ApsAgentProperties.Llm llm) {
+        String configured = normalize(llm == null ? null : llm.getProvider());
+        if (!configured.isEmpty() && !"none".equals(configured)) {
+            return configured;
+        }
+        boolean explicitlySet = !firstNonBlank(env(ENV_PROVIDER), env("LLM_PROVIDER")).isEmpty();
+        if (explicitlySet) {
+            return configured.isEmpty() ? "none" : configured;
+        }
+        if (llm != null && resolve(llm, "deepseek").complete()) {
+            return "deepseek";
+        }
+        return configured.isEmpty() ? "none" : configured;
+    }
+
+    private static String env(String key) {
+        String value = System.getenv(key);
+        return value == null ? "" : value.trim();
+    }
+
+    /**
      * 解析指定 provider 的生效配置。
      *
      * @param llm LLM 配置

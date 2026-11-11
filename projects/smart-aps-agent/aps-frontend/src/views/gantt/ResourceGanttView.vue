@@ -6,6 +6,7 @@ import {
   createGanttAdapter,
   getGanttDatasetProfile,
   getMockQueryRange,
+  getMockWideQueryRange,
   GANTT_DATASET_PROFILES
 } from '@/components/gantt/adapters'
 import { analyzeGanttDataset } from '@/components/gantt/analysis'
@@ -212,13 +213,10 @@ async function loadDataset(): Promise<void> {
   analysis.value = null
   metrics.value = null
   try {
-    // 5000 容量档的任务会溢出默认 7 天窗口，Mock 下放宽到整档跨度，避免淡出过滤后不足 5000 条。
+    // 5000 容量档的任务会溢出默认 8 天窗口，Mock 下放宽到整档跨度，避免淡出过滤后不足 5000 条。
     const range =
       dataSource.value === 'mock' && datasetKey.value === '5000x50'
-        ? {
-            from: new Date(Date.UTC(2026, 10, 1)).toISOString(),
-            to: new Date(Date.UTC(2026, 11, 31)).toISOString()
-          }
+        ? getMockWideQueryRange()
         : getMockQueryRange()
     const startedAt = performance.now()
     const data = await adapter.value.load({

@@ -6,7 +6,9 @@
 .DESCRIPTION
     只读环境变量，不写任何配置文件。环境变量契约（优先级：环境变量 > application.yml > 缺省）：
 
-      APS_AGENT_LLM_PROVIDER        deepseek | qwen | ollama | none（缺省 none，即 AI 关闭）
+      ds_url / ds_key               现场演示约定的端点与密钥（仅服务端读取；设置后自动启用 deepseek）
+      ds_model                      可选，deepseek 缺省 model=deepseek-chat
+      APS_AGENT_LLM_PROVIDER        deepseek | qwen | ollama | none（显式覆盖上面的自动选择）
       APS_AGENT_LLM_BASE_URL        OpenAI 兼容 base（DeepSeek/Qwen）；Ollama 为原生 base，如 http://127.0.0.1:11434
       APS_AGENT_LLM_API_KEY         密钥；Ollama 可留空
       APS_AGENT_LLM_MODEL           如 deepseek-chat / qwen3.5:9b
@@ -94,24 +96,36 @@ function Invoke-Psql {
 # 18085 是既有演示实例专用端口，演示脚本只允许独立端口。
 if ($Port -eq 18085) { Fail '禁止使用 18085：请换一个独立端口，例如 -Port 18099' }
 
+# ds_url / ds_key 是现场演示约定的环境变量名；APS_AGENT_LLM_* 仍可作为显式覆盖。
+# PowerShell 的环境变量读取不区分大小写，因此 ds_key / DS_KEY 都能取到。
+$dsUrl = $env:ds_url
+$dsKey = $env:ds_key
+$hasDsUrl = -not [string]::IsNullOrWhiteSpace($dsUrl)
+$hasDsKey = -not [string]::IsNullOrWhiteSpace($dsKey)
+
 $effectiveProvider = if ($Provider) { $Provider } else { $env:APS_AGENT_LLM_PROVIDER }
-if ([string]::IsNullOrWhiteSpace($effectiveProvider)) { $effectiveProvider = 'none' }
+if ([string]::IsNullOrWhiteSpace($effectiveProvider)) {
+    # 只要 ds_url + ds_key 齐备就自动启用 deepseek，现场不必再记一个 provider 变量。
+    $effectiveProvider = if ($hasDsUrl -and $hasDsKey) { 'deepseek' } else { 'none' }
+}
 $effectiveProvider = $effectiveProvider.Trim().ToLowerInvariant()
 
-$baseUrl = $env:APS_AGENT_LLM_BASE_URL
+$baseUrl = if (-not [string]::IsNullOrWhiteSpace($env:APS_AGENT_LLM_BASE_URL)) { $env:APS_AGENT_LLM_BASE_URL } elseif ($hasDsUrl) { $dsUrl } else { $null }
 $model = $env:APS_AGENT_LLM_MODEL
-$hasKey = -not [string]::IsNullOrWhiteSpace($env:APS_AGENT_LLM_API_KEY)
+if ([string]::IsNullOrWhiteSpace($model) -and $effectiveProvider -eq 'deepseek') { $model = 'deepseek-chat' }
+$apiKey = if (-not [string]::IsNullOrWhiteSpace($env:APS_AGENT_LLM_API_KEY)) { $env:APS_AGENT_LLM_API_KEY } elseif ($hasDsKey) { $dsKey } else { $null }
+$hasKey = -not [string]::IsNullOrWhiteSpace($apiKey)
 $timeoutSeconds = if ($env:APS_AGENT_LLM_TIMEOUT_SECONDS) { $env:APS_AGENT_LLM_TIMEOUT_SECONDS } else { '10（缺省）' }
 
 if ($effectiveProvider -ne 'none') {
     if ([string]::IsNullOrWhiteSpace($baseUrl)) {
-        Write-Host 'WARN  未设置 APS_AGENT_LLM_BASE_URL：explain 将降级为 EVIDENCE（NO_PROVIDER_CONFIGURED）' -ForegroundColor Yellow
+        Write-Host 'WARN  未设置 ds_url / APS_AGENT_LLM_BASE_URL：explain 将降级为 EVIDENCE（NO_PROVIDER_CONFIGURED）' -ForegroundColor Yellow
     }
     if ([string]::IsNullOrWhiteSpace($model)) {
-        Write-Host 'WARN  未设置 APS_AGENT_LLM_MODEL：explain 将降级为 EVIDENCE（NO_PROVIDER_CONFIGURED）' -ForegroundColor Yellow
+        Write-Host 'WARN  未设置 ds_model / APS_AGENT_LLM_MODEL：explain 将降级为 EVIDENCE（NO_PROVIDER_CONFIGURED）' -ForegroundColor Yellow
     }
     if ($effectiveProvider -ne 'ollama' -and -not $hasKey) {
-        Write-Host 'WARN  未设置 APS_AGENT_LLM_API_KEY：explain 将降级为 EVIDENCE（NO_PROVIDER_CONFIGURED）' -ForegroundColor Yellow
+        Write-Host 'WARN  未设置 ds_key / APS_AGENT_LLM_API_KEY：explain 将降级为 EVIDENCE（NO_PROVIDER_CONFIGURED）' -ForegroundColor Yellow
     }
 }
 
@@ -126,6 +140,56 @@ $exists = Invoke-Psql -Sql "SELECT 1 FROM pg_database WHERE datname = '$DbName'"
 if (-not $exists) {
     Write-Host "INFO  演示库 $DbName 不存在，以只读模板 $TemplateDb 复制一份" -ForegroundColor Cyan
     Invoke-Psql -Sql "CREATE DATABASE `"$DbName`" TEMPLATE `"$TemplateDb`"" -Database 'postgres' | Out-Null
+}
+
+# ----------------------------------------------------------------------------- 演示数据重锚
+# 演示库可能是几天前复制的：基线任务起始日不是今天就让 seed-demo 按当天重灌一遍。
+# 结论必须显式打印（已重锚 / 无需重锚 / 重锚失败原因），不允许静默跳过。
+$demoTenant = '00000000-0000-0000-0000-000000000001'
+$baselineSandbox = '00000000-0000-0000-0000-000000000401'
+$whatIfSandbox = 'e2700000-0000-0000-0000-000000000002'
+
+function Get-DemoDataState {
+    $sql = "SELECT " +
+        "(SELECT count(*) FROM task WHERE tenant_id='$demoTenant' AND sandbox_id='$baselineSandbox' AND deleted=false) || '|' || " +
+        "(SELECT count(*) FROM task WHERE tenant_id='$demoTenant' AND sandbox_id='$whatIfSandbox' AND deleted=false) || '|' || " +
+        "COALESCE((SELECT to_char(MIN(start_time) AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD') FROM task " +
+        "WHERE tenant_id='$demoTenant' AND sandbox_id='$baselineSandbox' AND deleted=false), '')"
+    $line = (Invoke-Psql -Sql $sql | Select-Object -First 1)
+    $parts = "$line" -split '\|'
+    return [pscustomobject]@{
+        BaselineTasks = [int]$parts[0]
+        WhatIfTasks   = [int]$parts[1]
+        FirstStartDay = if ($parts.Count -ge 3) { $parts[2] } else { '' }
+    }
+}
+
+$todayShanghai = [DateTimeOffset]::UtcNow.ToOffset([TimeSpan]::FromHours(8)).ToString('yyyy-MM-dd')
+$demoState = Get-DemoDataState
+$needReanchor = ($demoState.BaselineTasks -le 0) -or ($demoState.WhatIfTasks -le 0) -or ($demoState.FirstStartDay -ne $todayShanghai)
+
+if ($needReanchor) {
+    $reason = if ($demoState.BaselineTasks -le 0) { '基线任务为空' }
+        elseif ($demoState.WhatIfTasks -le 0) { 'What-If 任务为空' }
+        else { "基线任务起始日=$($demoState.FirstStartDay)，不是今天 $todayShanghai" }
+    Write-Host "INFO  演示数据需要重锚：$reason" -ForegroundColor Cyan
+    try {
+        & (Join-Path $PSScriptRoot 'seed-demo.ps1') -Database $DbName -Scene all -AnchorDate $todayShanghai `
+            -DbHost $DbHost -DbPort $DbPort -DbUser $DbUser -DbPassword $DbPassword -PsqlPath $psql
+    }
+    catch {
+        Fail "重锚失败：$($_.Exception.Message)（未启动实例；请检查 seed-demo 输出与数据库连接）"
+    }
+    $demoState = Get-DemoDataState
+    if ($demoState.BaselineTasks -le 0 -or $demoState.WhatIfTasks -le 0) {
+        Fail "重锚失败：重锚后基线任务=$($demoState.BaselineTasks)、What-If 任务=$($demoState.WhatIfTasks) 仍为空"
+    }
+    Write-Host ("REANCHOR  已按 {0} 重锚：baseline_tasks={1}，whatif_tasks={2}，first_start={3}" -f `
+        $todayShanghai, $demoState.BaselineTasks, $demoState.WhatIfTasks, $demoState.FirstStartDay) -ForegroundColor Green
+}
+else {
+    Write-Host ("REANCHOR  无需重锚：baseline_tasks={0}，whatif_tasks={1}，first_start={2}" -f `
+        $demoState.BaselineTasks, $demoState.WhatIfTasks, $demoState.FirstStartDay) -ForegroundColor Green
 }
 
 $owner = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
@@ -188,6 +252,10 @@ $env:APS_SECURITY_DEV_USER_ID_HEADER_ENABLED = 'true'
 if (-not $env:APS_SECURITY_API_KEYS_WRITE) { $env:APS_SECURITY_API_KEYS_WRITE = 'demo-local-key' }
 if (-not $env:APS_SECURITY_API_KEYS_READ) { $env:APS_SECURITY_API_KEYS_READ = 'demo-local-key' }
 $env:APS_AGENT_LLM_PROVIDER = $effectiveProvider
+# 仅在服务端进程环境中传递端点/密钥，且绝不回显具体值。
+if (-not [string]::IsNullOrWhiteSpace($baseUrl)) { $env:APS_AGENT_LLM_BASE_URL = $baseUrl }
+if (-not [string]::IsNullOrWhiteSpace($apiKey)) { $env:APS_AGENT_LLM_API_KEY = $apiKey }
+if (-not [string]::IsNullOrWhiteSpace($model)) { $env:APS_AGENT_LLM_MODEL = $model }
 $env:CLASSPATH = $classpath
 
 Write-Host ''

@@ -5,6 +5,7 @@
  * 订单与资源两视图共用同一套任务时间与 C14 日历解析，不复制口径。
  */
 import { ApiError } from '@/api/http'
+import { getMockRange, getMockWideRange } from '@/mocks/gantt-data'
 import { adjustTask, getOrderGantt, getResourceGantt, resolveResourceCalendars } from '@/api/gantt'
 import { getEnumLabel } from '@/constants/enums'
 import type {
@@ -686,13 +687,15 @@ export function createGanttAdapter(options: CreateGanttAdapterOptions = {}): Gan
     : createMockGanttAdapter(options.dataset)
 }
 
-/** Mock 数据档位对应的时间窗，供页面发起 load 使用。 */
+/** Mock 数据档位对应的时间窗，供页面发起 load 使用（以运行当天为锚点）。 */
 export function getMockQueryRange(): { from: string; to: string } {
-  return {
-    from: new Date(Date.UTC(2026, 10, 5)).toISOString(),
-    to: new Date(Date.UTC(2026, 10, 12)).toISOString()
-  }
+  return getMockRange()
 }
 
-export { GANTT_DATASET_PROFILES, getGanttDatasetProfile } from '@/mocks/gantt-data'
+/** 5000 容量档的宽窗口：任务会向未来铺开约 30 天。 */
+export function getMockWideQueryRange(): { from: string; to: string } {
+  return getMockWideRange()
+}
+
+export { GANTT_DATASET_PROFILES, getGanttDatasetProfile, getMockRange, getMockWideRange } from '@/mocks/gantt-data'
 export type { GanttDatasetKey }

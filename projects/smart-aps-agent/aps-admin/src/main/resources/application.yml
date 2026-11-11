@@ -120,9 +120,10 @@ aps:
     enabled: ${APS_AGENT_ENABLED:true}
     llm:
       # 优先级：环境变量 > 本文件同名配置 > 缺省。
-      # provider: APS_AGENT_LLM_PROVIDER（deepseek|qwen|ollama|none，缺省 none，不发起任何调用）
+      # provider: APS_AGENT_LLM_PROVIDER（deepseek|qwen|ollama|none）。未显式设置时，
+      # 若 ds_url 与 ds_key 齐备会自动启用 deepseek（见 LlmEndpointResolver#effectiveProvider）。
       # 扁平覆盖项非空时优先于下面 deepseek/qwen/ollama 各端点的同名字段；
-      # 单独配置某家 provider 也可直接写端点字段（兼容旧变量 DS_URL/DS_KEY 等）。
+      # ds_url / ds_key 为现场演示约定变量名，同时兼容旧变量 DS_URL / DS_KEY。
       # 密钥只允许来自环境变量/本机配置，禁止写入日志、响应与异常。
       provider: ${APS_AGENT_LLM_PROVIDER:${LLM_PROVIDER:none}}
       base-url: ${APS_AGENT_LLM_BASE_URL:}
@@ -133,9 +134,9 @@ aps:
       timeout-millis: ${APS_AGENT_LLM_TIMEOUT_MILLIS:10000}
       max-tokens: ${APS_AGENT_LLM_MAX_TOKENS:512}
       deepseek:
-        base-url: ${DS_URL:}
-        api-key: ${DS_KEY:}
-        model: ${DS_MODEL:${DS_MODEL_L1:deepseek-chat}}
+        base-url: ${ds_url:${DS_URL:}}
+        api-key: ${ds_key:${DS_KEY:}}
+        model: ${ds_model:${DS_MODEL:${DS_MODEL_L1:deepseek-chat}}}
       qwen:
         base-url: ${QW_URL:}
         api-key: ${QW_KEY:}

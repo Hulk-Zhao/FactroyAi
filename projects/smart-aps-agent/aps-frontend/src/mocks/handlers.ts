@@ -54,7 +54,15 @@ import type {
   UserCreateRequest,
   UserUpdateRequest
 } from '@/types/system'
-import type { SolveSubmitRequest, SolveTaskDetail } from '@/types/solve'
+import type {
+  ExplainCause,
+  ExplainResult,
+  SolveSubmitRequest,
+  SolveTaskDetail,
+  WhatIfRequest,
+  WhatIfResult
+} from '@/types/solve'
+import { generateResourceGanttData } from './gantt-data'
 import type { TaskAdjustRequest } from '@/types/gantt'
 import type {
   PlanAction,
@@ -1086,6 +1094,20 @@ function advanceMockImportJob(jobId: string): ImportJobView | null {
         finishedAt: now()
       }
   return record.view
+}
+
+let agentTasksCache: ReturnType<typeof generateResourceGanttData>['resources'][number]['tasks'] | null =
+  null
+
+/**
+ * 问答/解读离线兜底数据：直接复用仓库内 48×8 演示任务（已按运行当天锚定），
+ * 不依赖后端与外部模型，保证 Mock 模式下「问一问」有真实可对比的数据。
+ */
+function mockAgentTasks() {
+  if (!agentTasksCache) {
+    agentTasksCache = generateResourceGanttData('48x8').resources.flatMap((row) => row.tasks)
+  }
+  return agentTasksCache
 }
 
 export function handleMockRequest(config: InternalAxiosRequestConfig): MockReply {
@@ -2140,6 +2162,171 @@ export function handleMockRequest(config: InternalAxiosRequestConfig): MockReply
     }
     detail.status = 'CANCELLED'
     return ok(config, detail)
+  }
+
+  // C45 问答/解读：Mock 下用仓库内 48×8 任务做确定性对比，不调用任何外部模型。
+  if (method === 'POST' && path === '/agent/whatif') {
+    const body = readBody<WhatIfRequest>(config)
+    const question = (body.question ?? '').trim()
+    if (!question) {
+      return fail(config, 40000, 'question 不能为空', 400)
+    }
+    if (question.length > 2000) {
+      return fail(config, 40000, 'question 长度不能超过 2000', 400)
+    }
+    const sandbox = sandboxes.find((item) => item.id === body.sandboxId)
+    if (!sandbox) {
+      return fail(config, 40400, '场景不存在', 404)
+    }
+    if (sandbox.type !== 'WHAT_IF') {
+      return fail(config, 42200, 'what-if 仅支持 WHAT_IF 场景，主计划请使用 /sandboxes/{id}/compare', 422)
+    }
+    const tasks = mockAgentTasks()
+    const baselineSandboxId =
+      sandboxes.find((item) => item.type === 'BASELINE')?.id ?? DEFAULT_SANDBOX_ID
+    const requestedOrders =
+      `${question} ${String(body.parameters?.orderNos ?? '')}`.match(/DM-SO-\d{4}/g) ?? []
+    const focusOrder =
+      requestedOrders[0] ??
+      tasks.find((task) => task.status === 'IN_PROGRESS')?.orderNo ??
+      tasks[0]?.orderNo ??
+      ''
+    const focusTasks = tasks.filter((task) => task.orderNo === focusOrder)
+    const shiftMinutes = 120
+    const comparison: SandboxCompare = {
+      sandboxId: sandbox.id,
+      targetId: baselineSandboxId,
+      dueDateDeltaMinutes: shiftMinutes,
+      utilizationDelta: -0.012,
+      setupCountDelta: 0,
+      addedTaskCount: 0,
+      removedTaskCount: 0,
+      movedTaskCount: focusTasks.length,
+      changedTasks: focusTasks.map((task) => ({
+        taskId: task.id,
+        orderNo: task.orderNo,
+        resourceCode: task.resourceCode ?? 'UNASSIGNED',
+        changeType: 'MOVED' as const
+      })),
+      truncated: false
+    }
+    const resourceLoad = new Map<string, number>()
+    tasks.forEach((task) => {
+      const minutes = Math.max(
+        0,
+        (Date.parse(task.endTime ?? task.startTime ?? '') -
+          Date.parse(task.startTime ?? task.endTime ?? '')) /
+          60_000
+      )
+      const resourceCode = task.resourceCode ?? 'UNASSIGNED'
+      resourceLoad.set(resourceCode, (resourceLoad.get(resourceCode) ?? 0) + minutes)
+    })
+    const bottleneck = [...resourceLoad.entries()].sort((left, right) => right[1] - left[1])[0]
+    const answer =
+      `在「${sandbox.name}」中，将 ${focusOrder} 整体后移 ${shiftMinutes} 分钟：` +
+      `${focusTasks.length} 个任务被移动，交期后移 ${shiftMinutes} 分钟，产能利用率约下降 1.2%。` +
+      `当前负荷最高的资源是 ${bottleneck?.[0] ?? '—'}（累计 ${Math.round(bottleneck?.[1] ?? 0)} 分钟）。` +
+      `问题「${question}」已记录；结论来自仓库内 48×8 演示任务的确定性对比，不依赖外部模型。`
+    const result: WhatIfResult = {
+      sandboxId: sandbox.id,
+      baselineSandboxId,
+      baselineTaskCount: tasks.length,
+      afterTaskCount: tasks.length,
+      baselineEmpty: false,
+      comparisonWarnings: [],
+      question,
+      appliedChanges: [{ parameter: 'shiftMinutes', value: shiftMinutes }],
+      available: true,
+      unavailableReason: null,
+      comparison,
+      impactedOrders: focusOrder ? [focusOrder] : [],
+      impactedOrdersComplete: true,
+      bottleneckChange: {
+        before: { resourceCode: bottleneck?.[0] ?? '', utilization: 0.82 },
+        after: { resourceCode: bottleneck?.[0] ?? '', utilization: 0.808 },
+        comparable: true,
+        changed: true,
+        metric: 'UTILIZATION',
+        resourceDeltas: []
+      },
+      answer,
+      source: 'EVIDENCE',
+      solveStatus: 'SOLVED'
+    }
+    return ok(config, result)
+  }
+
+  const explainMatch = path.match(/^\/agent\/explain\/([^/]+)$/)
+  if (method === 'GET' && explainMatch) {
+    const taskId = Number(explainMatch[1])
+    if (!Number.isFinite(taskId)) {
+      return fail(config, 40000, 'taskId 非法', 400)
+    }
+    const tasks = mockAgentTasks()
+    const task = tasks.find((item) => item.id === taskId)
+    if (!task) {
+      return fail(config, 40400, '排产任务不存在', 404)
+    }
+    const start = Date.parse(task.startTime ?? '')
+    const end = Date.parse(task.endTime ?? '')
+    const overlaps = tasks.filter((other) => {
+      if (other.id === task.id || (other.resourceCode ?? null) !== (task.resourceCode ?? null)) {
+        return false
+      }
+      const otherStart = Date.parse(other.startTime ?? '')
+      const otherEnd = Date.parse(other.endTime ?? '')
+      return otherStart < end && otherEnd > start
+    })
+    const causes: ExplainCause[] = []
+    if (task.status === 'FROZEN') {
+      causes.push({
+        type: 'ORDER_FROZEN',
+        description: '订单已冻结，排程锁定该工序，调整需先解冻。'
+      })
+    }
+    if (task.status === 'IN_PROGRESS') {
+      causes.push({
+        type: 'IN_PROGRESS',
+        description: '任务已开工，后续排程只能在已开始时间之后调整。'
+      })
+    }
+    if (overlaps.length > 0) {
+      causes.push({
+        type: 'RESOURCE_OVERLAP',
+        description: `同资源 ${task.resourceCode} 上有 ${overlaps.length} 个任务与本任务时间重叠，存在资源冲突。`
+      })
+    }
+    if (causes.length === 0) {
+      causes.push({
+        type: 'SCHEDULABLE',
+        description: '任务在资源与日历约束下可正常排程，未发现硬冲突。'
+      })
+    }
+    const result: ExplainResult = {
+      taskId,
+      available: true,
+      source: 'EVIDENCE',
+      summary: `${task.orderNo} 工序 ${task.operationIndex}（${task.operationName}）在 ${task.resourceCode} 上排产 ${task.startTime} ~ ${task.endTime}`,
+      narrative:
+        `该任务的排产依据来自资源占用、日历与订单状态三组证据：` +
+        `状态为 ${task.status}，同资源重叠 ${overlaps.length} 个。` +
+        `当前为离线演示数据，AI 解读降级为证据模式，不调用外部模型。`,
+      causes,
+      suggestions:
+        task.status === 'FROZEN'
+          ? ['先解冻订单后再调整该工序', '若必须插单，改用 What-If 场景推演']
+          : overlaps.length > 0
+            ? ['将冲突工序移到相邻空档', '或改用备用资源后重新求解']
+            : ['保持当前排程', '如需压缩交期，可在 What-If 场景中调整优先级'],
+      constraintImpacts: [],
+      llm: {
+        configured: false,
+        provider: null,
+        fallbackReason: 'NO_PROVIDER_CONFIGURED',
+        fallbackSource: 'EVIDENCE'
+      }
+    }
+    return ok(config, result)
   }
 
   if (path.startsWith('/agent/')) {

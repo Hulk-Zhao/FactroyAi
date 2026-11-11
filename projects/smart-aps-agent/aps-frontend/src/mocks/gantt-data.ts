@@ -47,9 +47,50 @@ export const GANTT_DATASET_PROFILES: readonly GanttDatasetProfile[] = [
   }
 ]
 
-const RANGE_START = Date.UTC(2026, 10, 5, 0, 0, 0)
-const RANGE_END = Date.UTC(2026, 10, 12, 0, 0, 0)
 const MINUTE = 60 * 1000
+
+/** 演示数据以“运行当天”为锚点：任意一天打开都像一份正在执行中的计划。 */
+const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
+
+function startOfLocalDay(time: number): number {
+  const date = new Date(time)
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
+}
+
+/** 以 30 分钟为粒度取整，避免同一天多次刷新时任务时间大幅跳动。 */
+const NOW_MS = Math.floor(Date.now() / (30 * MINUTE)) * (30 * MINUTE)
+const TODAY_MS = startOfLocalDay(NOW_MS)
+
+/**
+ * 窗口固定为“昨天 00:00 ~ 未来第 7 天 00:00”，今天线落在约 1/8 处：
+ * 左侧是已完成任务，右侧是未来计划；跨周/跨月全部用毫秒运算，不会出现负工期。
+ */
+const RANGE_START = TODAY_MS - DAY
+const RANGE_END = TODAY_MS + 7 * DAY
+
+/** 首个订单在 3 小时前开工，保证打开页面就能看到“进行中”的任务与进度。 */
+const ORDER_START = Math.max(RANGE_START + 30 * MINUTE, NOW_MS - 3 * HOUR)
+
+/** Mock 甘特查询窗口（与生成器同源，供页面发起 load）。 */
+export function getMockRange(): { from: string; to: string } {
+  return { from: new Date(RANGE_START).toISOString(), to: new Date(RANGE_END).toISOString() }
+}
+
+/** 5000 容量档任务会溢出 8 天窗口，放宽到未来 45 天避免淡出过滤后不足 5000 条。 */
+export function getMockWideRange(): { from: string; to: string } {
+  return {
+    from: new Date(RANGE_START).toISOString(),
+    to: new Date(TODAY_MS + 45 * DAY).toISOString()
+  }
+}
+
+function localDayString(milliseconds: number): string {
+  const date = new Date(milliseconds)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
+    date.getDate()
+  ).padStart(2, '0')}`
+}
 
 const OPERATION_NAMES = ['下料', '机加工', '装配', '测试', '包装'] as const
 
@@ -215,6 +256,55 @@ function generateDenseResourceGanttData(
 }
 
 /**
+ * 演示保障：按当前时刻统一重算状态，并确保至少有一条“进行中”任务。
+ *
+ * <p>随机工期可能让首个订单的工序恰好全部落在过去或未来，导致甘特图上看不到
+ * 进行中的任务与进度。这里只平移首个订单的时间，让其中一道工序跨过“现在”，
+ * 其余订单与冲突样本保持不变。</p>
+ */
+function normalizeFe01Statuses(tasks: GanttTask[]): void {
+  const recalc = () => {
+    tasks.forEach((task) => {
+      if (task.status === 'FROZEN') {
+        return
+      }
+      const start = Date.parse(task.startTime ?? '')
+      const end = Date.parse(task.endTime ?? '')
+      task.status = end <= NOW_MS ? 'COMPLETED' : start <= NOW_MS ? 'IN_PROGRESS' : 'PLANNED'
+    })
+  }
+  recalc()
+  if (tasks.some((task) => task.status === 'IN_PROGRESS')) {
+    return
+  }
+  const firstOrderNo = tasks[0]?.orderNo
+  if (!firstOrderNo) {
+    return
+  }
+  const orderTasks = tasks.filter((task) => task.orderNo === firstOrderNo)
+  const candidate = orderTasks.reduce((best, task) =>
+    Math.abs(Date.parse(task.startTime ?? '') - NOW_MS) <
+    Math.abs(Date.parse(best.startTime ?? '') - NOW_MS)
+      ? task
+      : best
+  )
+  const delta = NOW_MS - 30 * MINUTE - Date.parse(candidate.startTime ?? '')
+  if (delta === 0) {
+    recalc()
+    return
+  }
+  orderTasks.forEach((task) => {
+    const shift = (value?: string | null): string | undefined =>
+      value ? iso(Date.parse(value) + delta) : undefined
+    task.setupStartTime = shift(task.setupStartTime)
+    task.setupEndTime = shift(task.setupEndTime)
+    task.startTime = shift(task.startTime)
+    task.endTime = shift(task.endTime)
+  })
+  recalc()
+}
+
+/**
  * 订单视图 Mock（M2-FE-02）：直接复用资源档的任务集合，按 orderNo 分组，
  * 不另造一份任务时间，保证订单甘特与资源甘特的口径同源。
  * dueDateLine 固定为 dueDate 当日 UTC 23:59:59（与 C29 一致）；每 3 个订单制造 1 个延期样本。
@@ -305,37 +395,37 @@ const WEEKDAY = [1, 2, 3, 4, 5]
 const WEEKDAY_SATURDAY = [1, 2, 3, 4, 5, 6]
 const EVERY_DAY = [1, 2, 3, 4, 5, 6, 7]
 
-/** 常白班：08:00-12:00 / 13:00-17:00，周一至周五；含 1 个法定停产日 + 1 个调休上班日；生效期到 11-10。 */
+/** 常白班：08:00-12:00 / 13:00-17:00，周一至周五；含 1 个法定停产日 + 1 个调休上班日；生效期随当天滚动。 */
 const MOCK_CAL_DAY = mockCalendar(
   'CAL-PLANT-1SHIFT',
   '全厂单班制日历（08:00-17:00）',
-  '2026-11-01',
-  '2026-11-10',
+  localDayString(TODAY_MS - 30 * DAY),
+  localDayString(TODAY_MS + 30 * DAY),
   [
     { startTime: '08:00', endTime: '12:00', daysOfWeek: WEEKDAY },
     { startTime: '13:00', endTime: '17:00', daysOfWeek: WEEKDAY }
   ],
   [
-    { date: '2026-11-06', name: '设备年度保养', kind: 'LEGAL' },
-    { date: '2026-11-08', name: '调休补班', kind: 'MAKEUP' }
+    { date: localDayString(TODAY_MS + 2 * DAY), name: '设备年度保养', kind: 'LEGAL' },
+    { date: localDayString(TODAY_MS + 4 * DAY), name: '调休补班', kind: 'MAKEUP' }
   ]
 )
 
-/** 两班制：08:00-20:00，周一至周六；11-10 公司停产检修。 */
+/** 两班制：08:00-20:00，周一至周六；未来第 5 天公司停产检修。 */
 const MOCK_CAL_TWO = mockCalendar(
   'CAL-SMT-2SHIFT',
   'SMT 贴片车间两班制日历',
-  '2026-11-01',
+  localDayString(TODAY_MS - 30 * DAY),
   null,
   [{ startTime: '08:00', endTime: '20:00', daysOfWeek: WEEKDAY_SATURDAY }],
-  [{ date: '2026-11-10', name: '计划停电检修', kind: 'COMPANY' }]
+  [{ date: localDayString(TODAY_MS + 5 * DAY), name: '计划停电检修', kind: 'COMPANY' }]
 )
 
 /** 连续生产：00:00-24:00，每天。 */
 const MOCK_CAL_CONTINUOUS = mockCalendar(
   'CAL-FAC-7X24',
   '全厂 7×24 连续生产日历',
-  '2026-01-01',
+  localDayString(TODAY_MS - 365 * DAY),
   null,
   [{ startTime: '00:00', endTime: '24:00', daysOfWeek: EVERY_DAY }]
 )
@@ -451,7 +541,7 @@ function generateFe01ResourceGanttData(sandboxId: string): ResourceGanttData {
   const random = createRandom(profile.seed)
   const tasks: GanttTask[] = []
   const orderCount = 12
-  const orderStart = RANGE_START + 30 * MINUTE
+  const orderStart = ORDER_START
 
   for (let orderIndex = 0; orderIndex < orderCount; orderIndex += 1) {
     const pair: 1 | 2 = orderIndex % 2 === 0 ? 1 : 2
@@ -464,14 +554,17 @@ function generateFe01ResourceGanttData(sandboxId: string): ResourceGanttData {
       const setupStart = cursor
       const start = setupStart + setupMinutes * MINUTE
       const end = start + runMinutes * MINUTE
-      const isCompletedOrder = orderIndex === 0
-      const status: TaskStatus = isCompletedOrder
-        ? 'COMPLETED'
-        : (orderIndex === 2 && operation === 3) ||
-            (orderIndex === 7 && operation === 2) ||
-            (orderIndex === 10 && operation === 1)
-          ? 'FROZEN'
-          : orderIndex === 1 && operation === 1
+      // 状态按“现在”动态推导：过去已完成、正在执行的为进行中、未来为计划中，
+      // 再保留 3 个冻结样本用于演示锁定/冲突。
+      const isFrozen =
+        (orderIndex === 2 && operation === 3) ||
+        (orderIndex === 7 && operation === 2) ||
+        (orderIndex === 10 && operation === 1)
+      const status: TaskStatus = isFrozen
+        ? 'FROZEN'
+        : end <= NOW_MS
+          ? 'COMPLETED'
+          : start <= NOW_MS
             ? 'IN_PROGRESS'
             : 'PLANNED'
       tasks.push({
@@ -530,6 +623,9 @@ function generateFe01ResourceGanttData(sandboxId: string): ResourceGanttData {
     dependentTask.setupEndTime = dependentTask.startTime
     dependentTask.setupStartTime = dependentTask.startTime
   }
+
+  // 冲突/依赖样本改过时间后按“现在”统一重算，并保证演示时能看到进行中任务与进度。
+  normalizeFe01Statuses(tasks)
 
   // 按资源 + 占用起点重新生成 sequenceInResource（C4：资源内按时间顺序）。
   const byResource = new Map<string, GanttTask[]>()

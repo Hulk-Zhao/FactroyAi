@@ -239,11 +239,20 @@ interface RenderSetup {
   left: number
   width: number
 }
+/** 任务名称标签：独立于任务条渲染，避免窄条把文字 ellipsis 掉。 */
+interface RenderLabel {
+  key: string
+  text: string
+  left: number
+  /** 条内标签为 true，文字压在任务条上；条外标签使用次级文字色。 */
+  inside: boolean
+}
 interface RenderRow {
   row: GanttDataset['rows'][number]
   top: number
   bars: RenderBar[]
   setups: RenderSetup[]
+  labels: RenderLabel[]
   heat: RenderBox[]
   idle: RenderBox[]
   calendar: RenderBox[]
@@ -466,6 +475,66 @@ function priorityLabel(priority?: string): string {
   return '普通'
 }
 
+/** 以 12px 字号粗略估算标签像素宽度；宁可用偏大的值，也不让两个标签叠在一起。 */
+function estimateLabelWidth(text: string): number {
+  let width = 0
+  for (const char of text) {
+    width += /[\u2e80-\u9fff\uff00-\uffef]/.test(char) ? 13 : 7.5
+  }
+  return Math.ceil(width) + 6
+}
+
+/**
+ * 任务名称标签布局：优先放进任务条内，其次占用右侧空隙，再尝试左侧空隙；
+ * 三者都放不下时宁可不画（悬停卡仍有全文），从而保证标签既不被截断、也不互相重叠。
+ */
+function layoutBarLabels(bars: RenderBar[]): RenderLabel[] {
+  const sorted = [...bars].sort((left, right) => left.left - right.left)
+  const labels: RenderLabel[] = []
+  const limit = timelineWidth.value
+  let occupiedRight = 0
+  sorted.forEach((entry, index) => {
+    const text = entry.bar.label?.trim()
+    const barRight = entry.left + entry.width
+    if (!text) {
+      occupiedRight = Math.max(occupiedRight, barRight)
+      return
+    }
+    const need = estimateLabelWidth(text)
+    // 1) 任务条足够宽：文字放条内，跟随状态色。
+    if (entry.width >= need + 8) {
+      labels.push({
+        key: `label-${entry.bar.taskId}`,
+        text,
+        left: entry.left + 4,
+        inside: true
+      })
+      occupiedRight = Math.max(occupiedRight, barRight)
+      return
+    }
+    const nextLeft = index + 1 < sorted.length ? sorted[index + 1].left : limit
+    // 2) 右侧空隙足够：标签紧贴任务条右侧，不侵入下一个任务。
+    //    留 6px 余量，抵消条形最小宽度与亚像素取整带来的误差。
+    const rightStart = Math.max(barRight + 6, occupiedRight + 6)
+    if (rightStart + need <= Math.min(nextLeft - 3, limit - 3)) {
+      labels.push({ key: `label-${entry.bar.taskId}`, text, left: rightStart, inside: false })
+      occupiedRight = rightStart + need
+      return
+    }
+    // 3) 左侧空隙足够：右对齐到任务条左边。
+    const leftEnd = entry.left - 6
+    const leftStart = leftEnd - need
+    if (leftStart >= occupiedRight + 8 && leftStart >= 2) {
+      labels.push({ key: `label-${entry.bar.taskId}`, text, left: leftStart, inside: false })
+      occupiedRight = leftEnd
+      return
+    }
+    // 放不下：只保留任务条本身，悬停卡仍展示完整名称。
+    occupiedRight = Math.max(occupiedRight, barRight)
+  })
+  return labels
+}
+
 const renderRows = computed<RenderRow[]>(() => {
   const from = rangeStart.value
   const to = rangeEnd.value
@@ -552,6 +621,7 @@ const renderRows = computed<RenderRow[]>(() => {
       top: index * props.rowHeight,
       bars,
       setups,
+      labels: layoutBarLabels(bars),
       heat,
       idle,
       calendar,
@@ -723,7 +793,7 @@ const ticks = computed<Tick[]>(() => {
       unit === 'hour'
         ? date.getHours() === 0
         : unit === 'day'
-          ? date.getDay() === 1
+          ? date.getDay() === 1 || date.getDate() === 1
           : unit === 'month'
             ? true
             : date.getMonth() !== new Date(cursor - 7 * 86_400_000).getMonth()
@@ -775,6 +845,42 @@ const nowLeft = computed(() => {
   }
   return (nowMs.value - rangeStart.value) * pxPerMs.value
 })
+
+/** 今日带：把“今天”整天铺一层浅色，和今日线一起避免用户找不到今天。 */
+const todayBand = computed<{ left: number; width: number } | null>(() => {
+  const from = rangeStart.value
+  const to = rangeEnd.value
+  const current = new Date(nowMs.value)
+  const dayStart = new Date(current.getFullYear(), current.getMonth(), current.getDate()).getTime()
+  const dayEnd = new Date(
+    current.getFullYear(),
+    current.getMonth(),
+    current.getDate() + 1
+  ).getTime()
+  if (dayEnd <= from || dayStart >= to) {
+    return null
+  }
+  const left = Math.max((Math.max(dayStart, from) - from) * pxPerMs.value, 0)
+  const right = Math.min((Math.min(dayEnd, to) - from) * pxPerMs.value, timelineWidth.value)
+  return right > left ? { left, width: right - left } : null
+})
+
+/** 小时粒度下说“现在”，日/周/月粒度下说“今天”，与轴头刻度语义一致。 */
+const nowLabel = computed(() => (tickUnit.value === 'hour' ? '现在' : '今天'))
+
+/** 进行中任务按已过时长估算进度；其他状态不画进度层，避免误导。 */
+function progressOf(bar: GanttBarModel): number {
+  if (bar.status !== 'IN_PROGRESS') {
+    return 0
+  }
+  const start = Date.parse(bar.startTime)
+  const end = Date.parse(bar.endTime)
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return 0
+  }
+  const ratio = (nowMs.value - start) / (end - start)
+  return Math.max(0, Math.min(100, Math.round(ratio * 100)))
+}
 
 const gridStepMs = computed(() => {
   if (tickUnit.value === 'hour') {
@@ -1093,12 +1199,18 @@ onBeforeUnmount(() => {
             <i class="gantt-axis__line" />
           </div>
           <div
+            v-if="todayBand"
+            class="gantt-today-band gantt-today-band--axis"
+            :style="{ left: `${todayBand.left}px`, width: `${todayBand.width}px` }"
+            aria-hidden="true"
+          />
+          <div
             v-if="nowLeft !== null"
             class="gantt-axis__now"
             :style="{ left: `${nowLeft}px` }"
             :title="`当前时刻 ${new Date(nowMs).toLocaleString('zh-CN', { hour12: false })}`"
           >
-            现在
+            {{ nowLabel }}
           </div>
         </div>
         <div
@@ -1123,6 +1235,12 @@ onBeforeUnmount(() => {
             :class="{ 'is-group-start': item.groupStart }"
             :style="{ top: `${item.top}px`, height: `${props.rowHeight}px` }"
           >
+            <div
+              v-if="todayBand"
+              class="gantt-today-band"
+              :style="{ left: `${todayBand.left}px`, width: `${todayBand.width}px` }"
+              aria-hidden="true"
+            />
             <div
               v-if="item.dueLeft !== null"
               class="gantt-due-line"
@@ -1197,13 +1315,27 @@ onBeforeUnmount(() => {
               <span v-if="calendarCheckByTask.has(entry.bar.taskId)" class="gantt-bar__off-calendar"
                 >非工时</span
               >
-              <span class="gantt-bar__label">{{ entry.bar.label }}</span>
+              <i
+                v-if="progressOf(entry.bar) > 0"
+                class="gantt-bar__progress"
+                :style="{ width: `${progressOf(entry.bar)}%` }"
+                aria-hidden="true"
+              />
               <i
                 class="gantt-bar__tint"
                 :style="{ background: orderTint(entry.bar.orderNo) }"
                 aria-hidden="true"
               />
             </div>
+            <span
+              v-for="label in item.labels"
+              :key="label.key"
+              class="gantt-row__label"
+              :class="{ 'gantt-row__label--inside': label.inside }"
+              :style="{ left: `${label.left}px` }"
+              aria-hidden="true"
+              >{{ label.text }}</span
+            >
           </div>
 
           <svg
@@ -1270,6 +1402,10 @@ onBeforeUnmount(() => {
         开始 → 结束：{{ formatTime(hovered.bar.startTime) }} → {{ formatTime(hovered.bar.endTime) }}
       </div>
       <div>加工时长：{{ durationText(hovered.bar.startTime, hovered.bar.endTime) }}</div>
+      <div v-if="progressOf(hovered.bar) > 0">
+        进度：{{ progressOf(hovered.bar) }}%（按已过时长估算）
+      </div>
+      <div v-else-if="hovered.bar.status === 'COMPLETED'">进度：已完成</div>
       <div>
         换型：{{ setupDurationText(hovered.bar) }}<template
           v-if="hovered.bar.setupStartTime && hovered.bar.setupEndTime"
@@ -1750,10 +1886,49 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
 }
 
-.gantt-bar__label {
-  overflow: hidden;
+/* 进度层：仅“进行中”任务绘制，按已过时长/总时长填充，长任务一眼看出做到哪。 */
+.gantt-bar__progress {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--text) 18%, transparent);
+  pointer-events: none;
+}
+
+/* 任务名称独立于任务条渲染：不换行、不省略号；放不下时直接不渲染，悬停卡保留全文。 */
+.gantt-row__label {
+  position: absolute;
+  top: 7px;
+  height: 20px;
+  line-height: 20px;
+  font-size: var(--font-xs);
+  color: var(--text-2);
   white-space: nowrap;
-  text-overflow: ellipsis;
+  pointer-events: none;
+  z-index: 2;
+  text-shadow:
+    0 0 3px var(--card),
+    0 0 2px var(--card);
+}
+
+.gantt-row__label--inside {
+  color: var(--text);
+  text-shadow: none;
+}
+
+/* 今日带：浅色铺满“今天”，配合今日线让用户一眼定位当前位置。 */
+.gantt-today-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--danger) 7%, transparent);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.gantt-today-band--axis {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
 
 .gantt-bar__lock {

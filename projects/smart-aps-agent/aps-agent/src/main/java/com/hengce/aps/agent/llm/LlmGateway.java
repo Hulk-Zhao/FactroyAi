@@ -35,7 +35,7 @@ public final class LlmGateway {
     public LlmGateway(LlmProviderFactory factory, ApsAgentProperties properties) {
         this.factory = factory;
         this.llmProperties = properties.getLlm();
-        this.configuredProvider = properties.getLlm().getProvider();
+        this.configuredProvider = LlmEndpointResolver.effectiveProvider(properties.getLlm());
     }
 
     /**

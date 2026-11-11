@@ -5,6 +5,8 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   createGanttAdapter,
   getGanttDatasetProfile,
+  getMockQueryRange,
+  getMockWideQueryRange,
   GANTT_DATASET_PROFILES
 } from '@/components/gantt/adapters'
 import { analyzeGanttDataset } from '@/components/gantt/analysis'
@@ -69,23 +71,25 @@ const zoomOptions: Array<{ value: GanttZoom; label: string }> = [
 ]
 
 /**
- * 联调只读窗口：后端 18085 现存数据覆盖 2026-11-01 → 11-12（与 M2-FE-01 相同的时间事实），
- * 页面只做 GET，不写入任何排程数据。
+ * 联调只读窗口：以后端种子数据“运行当天”为锚点，向前留 2 天看已完成/进行中，
+ * 向后留 10 天看未来计划。页面只做 GET，不写入任何排程数据。
  */
+const DAY_MS = 24 * 60 * 60 * 1000
+const TODAY_START = (() => {
+  const now = new Date()
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+})()
 const QUERY_RANGE = {
-  from: new Date(Date.UTC(2026, 10, 1)).toISOString(),
-  to: new Date(Date.UTC(2026, 10, 12)).toISOString()
+  from: new Date(TODAY_START - 2 * DAY_MS).toISOString(),
+  to: new Date(TODAY_START + 10 * DAY_MS).toISOString()
 }
 
 /**
- * 5000 任务容量档的任务会溢出 11-05 → 11-12 的默认窗口。
+ * 5000 任务容量档的任务会溢出默认窗口。
  * Mock 下放宽到整档实际跨度，确保「5000 任务」档位真的是 5000 条任务参与渲染，
  * 否则按默认窗口过滤后只剩约 1/4，性能采样会失真。
  */
-const CAPACITY_MOCK_RANGE = {
-  from: new Date(Date.UTC(2026, 10, 1)).toISOString(),
-  to: new Date(Date.UTC(2026, 11, 31)).toISOString()
-}
+const CAPACITY_MOCK_RANGE = getMockWideQueryRange()
 
 const datasetKey = ref<GanttDatasetKey>('48x8')
 const zoom = ref<GanttZoom>('day')
@@ -1034,8 +1038,10 @@ async function loadDataset(preserveSelection = false): Promise<void> {
   try {
     const startedAt = performance.now()
     const range =
-      dataSource.value === 'mock' && datasetKey.value === '5000x50'
-        ? CAPACITY_MOCK_RANGE
+      dataSource.value === 'mock'
+        ? datasetKey.value === '5000x50'
+          ? CAPACITY_MOCK_RANGE
+          : getMockQueryRange()
         : QUERY_RANGE
     const data = await adapter.value.load({
       sandboxId: DEFAULT_SANDBOX_ID,

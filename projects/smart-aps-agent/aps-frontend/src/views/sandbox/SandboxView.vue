@@ -51,7 +51,15 @@ const compareSourceId = ref('')
 const compareTargetId = ref('')
 
 const baseline = computed(() => rows.value.find((item) => item.type === 'BASELINE') ?? null)
-const whatIfOptions = computed(() => rows.value.filter((item) => item.type === 'WHAT_IF'))
+
+/**
+ * 问答场景独立拉取 WHAT_IF 列表：
+ * 场景列表是分页的，只从当前页过滤会漏掉排在第 2 页及之后的 What-If 场景，
+ * 导致「问一问」选不到场景、只能看到空结果。
+ */
+const whatIfScenarios = ref<Sandbox[]>([])
+const whatIfOptions = computed(() => whatIfScenarios.value)
+const whatIfLoading = ref(false)
 
 const askSandboxId = ref('')
 const askQuestion = ref('')
@@ -63,6 +71,34 @@ const askMessage = ref('')
 const askCode = ref<number | null>(null)
 const askHttpStatus = ref<number | null>(null)
 const askTraceId = ref('')
+
+/** 示例问题只做引导：问题文本用于回显与审计，结论仍来自真实沙箱推演的对比数据。 */
+const ASK_SAMPLES = [
+  '这个方案相比基线移动了哪些任务？',
+  '换型次数和产能利用率变化多少？',
+  '交期整体提前还是推后？'
+]
+
+function useAskSample(text: string): void {
+  askQuestion.value = text
+  syncWhatIfHelp()
+}
+
+async function loadWhatIfScenarios(): Promise<void> {
+  whatIfLoading.value = true
+  try {
+    const result = await listSandboxes({ page: 1, size: 50, type: 'WHAT_IF' })
+    whatIfScenarios.value = result.items.filter((item) => item.type === 'WHAT_IF')
+    if (!whatIfScenarios.value.some((item) => item.id === askSandboxId.value)) {
+      askSandboxId.value = whatIfScenarios.value[0]?.id ?? ''
+    }
+  } catch {
+    // 场景列表加载失败不阻断主列表；问答卡片会显示"暂无可用场景"提示。
+    whatIfScenarios.value = []
+  } finally {
+    whatIfLoading.value = false
+  }
+}
 
 /** 只做参数白名单拼装：orderNos 显式解析，其余未识别参数不发给后端。 */
 async function submitAsk(): Promise<void> {
@@ -174,9 +210,7 @@ async function loadSandboxes() {
     if (!compareTargetId.value) {
       compareTargetId.value = baseline.value?.id ?? ''
     }
-    if (!askSandboxId.value) {
-      askSandboxId.value = whatIfOptions.value[0]?.id ?? ''
-    }
+    await loadWhatIfScenarios()
   } catch (exception) {
     rows.value = []
     total.value = 0
@@ -493,16 +527,20 @@ function compareWithBaseline(row: Sandbox) {
           <el-select
             id="ask-sandbox"
             v-model="askSandboxId"
-            placeholder="选择场景（仅 What-If 可用）"
+            :loading="whatIfLoading"
+            placeholder="选择 What-If 场景"
             style="width: 100%"
           >
             <el-option
-              v-for="item in rows"
+              v-for="item in whatIfOptions"
               :key="item.id"
               :label="item.name"
               :value="item.id"
             />
           </el-select>
+          <p v-if="!whatIfLoading && whatIfOptions.length === 0" class="ask-empty-hint">
+            暂无 What-If 场景。请先在上方创建一个 What-If 方案，或确认种子数据已导入。
+          </p>
         </div>
         <div class="filter-field">
           <label class="field-label" for="ask-order-nos">订单号（可空，逗号或空格分隔）</label>
@@ -510,7 +548,7 @@ function compareWithBaseline(row: Sandbox) {
             id="ask-order-nos"
             v-model="askOrderNos"
             clearable
-            placeholder="如 SO-20261105-001, SO-20261105-002"
+            placeholder="如 DM-SO-1001, DM-SO-1002"
           />
         </div>
         <div class="filter-field ask-question">
@@ -524,9 +562,27 @@ function compareWithBaseline(row: Sandbox) {
             show-word-limit
             placeholder="仅用于回显与审计，不参与语义解析；结果来自真实沙箱推演"
           />
+          <div class="ask-samples">
+            <span class="ask-samples__label">示例：</span>
+            <button
+              v-for="sample in ASK_SAMPLES"
+              :key="sample"
+              type="button"
+              class="ask-samples__item"
+              @click="useAskSample(sample)"
+            >
+              {{ sample }}
+            </button>
+          </div>
         </div>
         <div class="ask-actions">
-          <el-button type="primary" :loading="askLoading" @click="submitAsk">问一问</el-button>
+          <el-button
+            type="primary"
+            :loading="askLoading"
+            :disabled="whatIfOptions.length === 0"
+            @click="submitAsk"
+            >问一问</el-button
+          >
         </div>
       </div>
 
@@ -767,6 +823,42 @@ function compareWithBaseline(row: Sandbox) {
 
 .ask-question {
   grid-column: 1 / -1;
+}
+
+.ask-empty-hint {
+  margin: 6px 0 0;
+  font-size: var(--font-xs);
+  color: var(--warning, #b26a00);
+  line-height: 1.5;
+}
+
+.ask-samples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.ask-samples__label {
+  font-size: var(--font-xs);
+  color: var(--text-2);
+}
+
+.ask-samples__item {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-soft);
+  color: var(--text-2);
+  font-size: var(--font-xs);
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.ask-samples__item:hover {
+  border-color: var(--primary);
+  color: var(--primary);
 }
 
 .ask-actions {
